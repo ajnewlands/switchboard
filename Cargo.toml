@@ -5,6 +5,7 @@ authors = ["Andrew Newlands <andrew_newlands@hotmail.com>"]
 edition = "2018"
 
 [dependencies]
+uuid = { version = "0.7", features = ["v4"] }
 actix = "0.8.2"
 actix-codec = "0.1.2"
 actix-web = "1.0.0"

@@ -1,35 +1,37 @@
-//! Simple echo websocket server.
-//! Open `http://localhost:8080/ws/index.html` in browser
-//! or [python console client](https://github.com/actix/examples/blob/master/websocket/websocket-client.py)
-//! could be used for testing.
+//! websocket <-> message queue switchboard
+//! Open `http://localhost:8080/ws/index.html` in browser to test
 
 use std::time::{Duration, Instant};
+use std::sync::{Mutex, Arc};
 
 use actix::prelude::*;
 use actix_files as fs;
 use actix_web::{middleware, web, App, Error, HttpRequest, HttpResponse, HttpServer};
 use actix_web_actors::ws;
 
+mod rabbit;
+
 /// How often heartbeat pings are sent
 const HEARTBEAT_INTERVAL: Duration = Duration::from_secs(5);
 /// How long before lack of client response causes a timeout
 const CLIENT_TIMEOUT: Duration = Duration::from_secs(10);
 
+
+
 /// do websocket handshake and start `MyWebSocket` actor
-fn ws_index(r: HttpRequest, stream: web::Payload) -> Result<HttpResponse, Error> {
-    println!("{:?}", r);
-    let res = ws::start(MyWebSocket::new(), &r, stream);
-    println!("{:?}", res.as_ref().unwrap());
-    res
+fn ws_index(r: HttpRequest, stream: web::Payload, data: web::Data<Arc<Mutex<Addr<rabbit::RabbitReceiver>>>>) -> Result<HttpResponse, Error> {
+    data.lock().unwrap().do_send(rabbit::Add{});
+
+    return ws::start(MyWebSocket::new(data.clone()), &r, stream);
 }
 
-/// websocket connection is long running connection, it easier
-/// to handle with an actor
+/// Actor implementing the websocket connection
 struct MyWebSocket {
     /// Client must send ping at least once per 10 seconds (CLIENT_TIMEOUT),
-    /// otherwise we drop connection.
     hb: Instant,
+    rabbit: web::Data<Arc<Mutex<Addr<rabbit::RabbitReceiver>>>>,
 }
+
 
 impl Actor for MyWebSocket {
     type Context = ws::WebsocketContext<Self>;
@@ -61,11 +63,22 @@ impl StreamHandler<ws::Message, ws::ProtocolError> for MyWebSocket {
             ws::Message::Nop => (),
         }
     }
+
+    fn started(&mut self, _ctx: &mut Self::Context) {
+        println!("websocket is started");
+    }
 }
 
-impl MyWebSocket {
-    fn new() -> Self {
-        Self { hb: Instant::now() }
+impl Drop for MyWebSocket {
+        fn drop(&mut self) {
+        println!("Dropping a websocket");
+        self.rabbit.lock().unwrap().do_send(rabbit::Goodbye{});
+    }
+}
+
+impl MyWebSocket {    
+    fn new(addr: web::Data<Arc<Mutex<Addr<rabbit::RabbitReceiver>>>>) -> Self {
+        Self { hb: Instant::now(), rabbit: addr }
     }
 
     /// helper method that sends ping to client every second.
@@ -94,8 +107,12 @@ fn main() -> std::io::Result<()> {
     std::env::set_var("RUST_LOG", "actix_server=info,actix_web=info");
     env_logger::init();
 
-    HttpServer::new(|| {
+    let sys = System::new("switchboard");
+    let rabbit = rabbit::RabbitReceiver::default().start();
+
+    let r = HttpServer::new(move || {
         App::new()
+            .data(Arc::new(Mutex::new(rabbit.clone())))
             // enable logger
             .wrap(middleware::Logger::default())
             // websocket route
@@ -105,5 +122,11 @@ fn main() -> std::io::Result<()> {
     })
     // start http server on 127.0.0.1:8080
     .bind("127.0.0.1:8080")?
-    .run()
+    .run();
+
+    return match r {
+        Err(x) => Err(x),
+        _ => sys.run()
+    };
+
 }
