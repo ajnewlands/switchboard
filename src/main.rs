@@ -2,7 +2,7 @@
 //! Open `http://localhost:8080/ws/index.html` in browser to test
 
 use std::time::{Duration, Instant};
-use std::sync::{Mutex, Arc};
+use std::rc::Rc;
 
 use actix::prelude::*;
 use actix_files as fs;
@@ -19,8 +19,8 @@ const CLIENT_TIMEOUT: Duration = Duration::from_secs(10);
 
 
 /// do websocket handshake and start `MyWebSocket` actor
-fn ws_index(r: HttpRequest, stream: web::Payload, data: web::Data<Arc<Mutex<Addr<rabbit::RabbitReceiver>>>>) -> Result<HttpResponse, Error> {
-    data.lock().unwrap().do_send(rabbit::Add{});
+fn ws_index(r: HttpRequest, stream: web::Payload, data: web::Data<Rc<Addr<rabbit::RabbitReceiver>>>) -> Result<HttpResponse, Error> {
+    data.do_send(rabbit::Add{});
 
     return ws::start(MyWebSocket::new(data.clone()), &r, stream);
 }
@@ -29,7 +29,7 @@ fn ws_index(r: HttpRequest, stream: web::Payload, data: web::Data<Arc<Mutex<Addr
 struct MyWebSocket {
     /// Client must send ping at least once per 10 seconds (CLIENT_TIMEOUT),
     hb: Instant,
-    rabbit: web::Data<Arc<Mutex<Addr<rabbit::RabbitReceiver>>>>,
+    rabbit: web::Data<Rc<Addr<rabbit::RabbitReceiver>>>,
 }
 
 
@@ -72,12 +72,12 @@ impl StreamHandler<ws::Message, ws::ProtocolError> for MyWebSocket {
 impl Drop for MyWebSocket {
         fn drop(&mut self) {
         println!("Dropping a websocket");
-        self.rabbit.lock().unwrap().do_send(rabbit::Goodbye{});
+        self.rabbit.do_send(rabbit::Goodbye{});
     }
 }
 
 impl MyWebSocket {    
-    fn new(addr: web::Data<Arc<Mutex<Addr<rabbit::RabbitReceiver>>>>) -> Self {
+    fn new(addr: web::Data<Rc<Addr<rabbit::RabbitReceiver>>>) -> Self {
         Self { hb: Instant::now(), rabbit: addr }
     }
 
@@ -112,7 +112,7 @@ fn main() -> std::io::Result<()> {
 
     let r = HttpServer::new(move || {
         App::new()
-            .data(Arc::new(Mutex::new(rabbit.clone())))
+            .data(Rc::new(rabbit.clone()))
             // enable logger
             .wrap(middleware::Logger::default())
             // websocket route
