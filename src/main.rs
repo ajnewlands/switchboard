@@ -3,6 +3,8 @@
 
 use std::time::{Duration, Instant};
 use std::rc::Rc;
+use std::io;
+use log::{info, error};
 
 use actix::prelude::*;
 use actix_files as fs;
@@ -104,29 +106,36 @@ impl MyWebSocket {
 }
 
 fn main() -> std::io::Result<()> {
-    std::env::set_var("RUST_LOG", "actix_server=info,actix_web=info");
+    std::env::set_var("RUST_LOG", "info,actix_server=info,actix_web=info");
     env_logger::init();
+    
+    let amqp = std::env::var("AMQP_ADDR").unwrap_or_else(|_| "amqp://127.0.0.1:5672/%2f".into());
+    let timeout: u64 = 30000;
 
-    let sys = System::new("switchboard");
-    let rabbit = rabbit::RabbitReceiver::default().start();
+    return match rabbit::get_connection(amqp, timeout) {
+        Ok(conn) => {
+            let sys = System::new("switchboard");    
+            let rabbit = rabbit::RabbitReceiver::with_connection(conn).start();
 
-    let r = HttpServer::new(move || {
-        App::new()
-            .data(Rc::new(rabbit.clone()))
-            // enable logger
-            .wrap(middleware::Logger::default())
-            // websocket route
-            .service(web::resource("/ws/").route(web::get().to(ws_index)))
-            // static files
-            .service(fs::Files::new("/", "static/").index_file("index.html"))
-    })
-    // start http server on 127.0.0.1:8080
-    .bind("127.0.0.1:8080")?
-    .run();
+            let r = HttpServer::new(move || {
+                App::new()
+                    .data(Rc::new(rabbit.clone()))
+                    .wrap(middleware::Logger::default())
+                    .service(web::resource("/ws/").route(web::get().to(ws_index)))
+                    .service(fs::Files::new("/", "static/").index_file("index.html"))
+            })
+            // start http server on 127.0.0.1:8080
+            .bind("127.0.0.1:8080")?
+            .run();
 
-    return match r {
-        Err(x) => Err(x),
-        _ => sys.run()
+            return match r {
+                Err(e) => Err(e),
+                _ => sys.run()
+            };
+        },
+        Err(e) => {
+            error!("{}", e);
+            Err(io::Error::new(io::ErrorKind::NotConnected, e))
+        },
     };
-
 }
