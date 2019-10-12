@@ -22,7 +22,7 @@ const CLIENT_TIMEOUT: Duration = Duration::from_secs(10);
 
 /// do websocket handshake and start `MyWebSocket` actor
 fn ws_index(r: HttpRequest, stream: web::Payload, data: web::Data<Rc<Addr<rabbit::RabbitReceiver>>>) -> Result<HttpResponse, Error> {
-    data.do_send(rabbit::Add{});
+    data.do_send(rabbit::AddSocket{});
 
     return ws::start(MyWebSocket::new(data.clone()), &r, stream);
 }
@@ -74,7 +74,7 @@ impl StreamHandler<ws::Message, ws::ProtocolError> for MyWebSocket {
 impl Drop for MyWebSocket {
         fn drop(&mut self) {
         println!("Dropping a websocket");
-        self.rabbit.do_send(rabbit::Goodbye{});
+        self.rabbit.do_send(rabbit::DelSocket{});
     }
 }
 
@@ -112,8 +112,11 @@ fn main() -> std::io::Result<()> {
     let amqp = std::env::var("AMQP_ADDR").unwrap_or_else(|_| "amqp://127.0.0.1:5672/%2f".into());
     let timeout: u64 = 30000;
 
+    info!("Connecting to Rabbit..");
+
     return match rabbit::get_connection(amqp, timeout) {
         Ok(conn) => {
+            info!("Connected to Rabbit");
             let sys = System::new("switchboard");    
             let rabbit = rabbit::RabbitReceiver::with_connection(conn).start();
 

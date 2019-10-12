@@ -1,12 +1,9 @@
 use actix::prelude::*;
 use uuid::Uuid;
-use env_logger;
 use lapin;
-use log::{info, error};
 use std::sync::mpsc;
 use std::thread;
 use std::time::Duration;
-use std::error::Error;
 
 use lapin::{
   BasicProperties, Channel, Connection, ConnectionProperties, ConsumerDelegate,
@@ -18,16 +15,11 @@ use lapin::{
 pub fn get_connection(amqp: String, timeout: u64) -> Result<Connection, String> {
         let (sender, receiver) = mpsc::channel();
 
-        info!("Connecting to rabbitmq");
-
-        let t = thread::spawn(move ||{
+        let _t = thread::spawn(move ||{
             let conn = Connection::connect(&amqp, ConnectionProperties::default())
                 .wait()
                 .expect("Failed connecting to rabbit");
-            match sender.send(conn) {
-                Ok(()) => info!("Connected to rabbit"),
-                Err(_) => {},
-            };
+            sender.send(conn).unwrap();
         });
 
         return match receiver.recv_timeout(Duration::from_millis(timeout)) {
@@ -47,10 +39,10 @@ impl RabbitReceiver {
     }
 }
 
-impl Handler<Add> for RabbitReceiver {
+impl Handler<AddSocket> for RabbitReceiver {
     type Result = ();
 
-    fn handle(&mut self, _msg: Add, _ctx: &mut Context<Self>)  {
+    fn handle(&mut self, _msg: AddSocket, _ctx: &mut Context<Self>)  {
         self.count += 1;
         let session_id = Uuid::new_v4();
         println!("Session id {}", session_id);
@@ -58,10 +50,10 @@ impl Handler<Add> for RabbitReceiver {
     }
 }
 
-impl Handler<Goodbye> for RabbitReceiver {
+impl Handler<DelSocket> for RabbitReceiver {
     type Result = ();
 
-    fn handle (&mut self, _msg: Goodbye, _ctx: &mut Context<Self>)  {
+    fn handle (&mut self, _msg: DelSocket, _ctx: &mut Context<Self>)  {
         self.count -= 1;
         println!("Connected sockets now {}", self.count);
 
@@ -71,16 +63,12 @@ impl Handler<Goodbye> for RabbitReceiver {
 // Rabbit receiver object
 impl Actor for RabbitReceiver {
     type Context = Context<Self>;
-
-    fn started(&mut self, _ctx: &mut Self::Context) {
-        println!("Rabbit actor started");
-    }
 }
 
 /// Message send to rabbit receiver to register another websocket on the switchboard.
 #[derive(Clone, Debug, Message)]
-pub struct Add {}
+pub struct AddSocket {}
 
 /// Message sent to Rabbit Receiver to deregister a websocket on disconnection.
 #[derive(Clone, Debug, Message)]
-pub struct Goodbye{}
+pub struct DelSocket{}
