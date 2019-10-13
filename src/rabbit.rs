@@ -5,6 +5,7 @@ use std::sync::mpsc;
 use std::thread;
 use std::time::Duration;
 use std::rc::Rc;
+use std::sync::Arc;
 
 
 use lapin::{
@@ -16,18 +17,15 @@ use lapin::{
 };
 
 
-
-
-
 pub struct RabbitReceiver {
-    chan: Rc<Channel>,
+    chan: Arc<Channel>,
     count: usize,
 }
 
 impl RabbitReceiver {
     pub fn new(amqp: String, timeout: u64, exchange: &str, queue: &str) -> Result<RabbitReceiver, std::io::Error> {
         let conn = RabbitReceiver::get_connection(amqp, timeout)?;
-        let chan = Rc::new(RabbitReceiver::get_channel(conn)?);
+        let chan = Arc::new(RabbitReceiver::get_channel(conn)?);
         let ex = RabbitReceiver::create_exchange(chan.clone(), exchange)?;
         let q = RabbitReceiver::create_queue(chan.clone(), queue)?;
         RabbitReceiver::create_bindings(chan.clone(), queue, exchange)?;
@@ -63,7 +61,7 @@ impl RabbitReceiver {
     }
 
     /// Declare the named exchange, creating it if it doesn exist already.
-    fn create_exchange(chan: Rc<Channel>, exchange: &str) -> Result<&str, std::io::Error> {
+    fn create_exchange(chan: Arc<Channel>, exchange: &str) -> Result<&str, std::io::Error> {
         return match chan.exchange_declare(exchange , ExchangeKind::Headers, ExchangeDeclareOptions::default(), FieldTable::default()).wait() {
             Ok(_) => Ok(exchange),
             Err(e) => Err(std::io::Error::new(std::io::ErrorKind::NotConnected, e)),
@@ -71,24 +69,27 @@ impl RabbitReceiver {
     }
 
     /// Declare the named queue (creating it if it doesn't exist)
-    fn create_queue(chan: Rc<Channel>, queue: &str) -> Result<Queue, std::io::Error> {
+    fn create_queue(chan: Arc<Channel>, queue: &str) -> Result<Queue, std::io::Error> {
         return match chan.queue_declare(queue, QueueDeclareOptions::default(), FieldTable::default()).wait() {
             Ok(q) => Ok(q),
             Err(e) => Err(std::io::Error::new(std::io::ErrorKind::NotConnected, e)),
         };
     }
 
-    fn create_bindings(chan: Rc<Channel>, queue: &str, exchange: &str) -> Result<(), std::io::Error> {
+    fn create_bindings(chan: Arc<Channel>, queue: &str, exchange: &str) -> Result<(), std::io::Error> {
         return match chan.queue_bind(queue, exchange, "", QueueBindOptions::default(), FieldTable::default()).wait() {
             Ok(_) => Ok(()),
             Err(e) => Err(std::io::Error::new(std::io::ErrorKind::NotConnected, e)),
         };
     }
 
-    fn consume(chan: Rc<Channel>, queue: &Queue) -> Result<(), std::io::Error> {
+    fn consume(chan: Arc<Channel>, queue: &Queue) -> Result<(), std::io::Error> {
         return match chan.basic_consume(queue, "switchboard", BasicConsumeOptions::default(), FieldTable::default()).wait() {
             Ok(con) => Ok(con.set_delegate(Box::new(move| delivery: DeliveryResult |{
                 println!("received message: {:?}", delivery);
+                if let Ok(Some(delivery)) = delivery {
+                    chan.basic_ack(delivery.delivery_tag, BasicAckOptions::default()).wait().expect("ACK failed");
+                };
             }))),
             Err(e) => Err(std::io::Error::new(std::io::ErrorKind::NotConnected, e)),
         };
