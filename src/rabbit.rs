@@ -4,15 +4,40 @@ use lapin;
 use std::sync::mpsc;
 use std::thread;
 use std::time::Duration;
+use std::rc::Rc;
+
 
 use lapin::{
   BasicProperties, Channel, Connection, ConnectionProperties, ConsumerDelegate,
-  message::Delivery,
-  options::*,
+  message::{Delivery, DeliveryResult},
   types::FieldTable,
+  ExchangeKind, options::*,
+  Queue,
 };
 
-pub fn get_connection(amqp: String, timeout: u64) -> Result<Connection, String> {
+
+
+
+
+pub struct RabbitReceiver {
+    chan: Rc<Channel>,
+    count: usize,
+}
+
+impl RabbitReceiver {
+    pub fn new(amqp: String, timeout: u64, exchange: &str, queue: &str) -> Result<RabbitReceiver, std::io::Error> {
+        let conn = RabbitReceiver::get_connection(amqp, timeout)?;
+        let chan = Rc::new(RabbitReceiver::get_channel(conn)?);
+        let ex = RabbitReceiver::create_exchange(chan.clone(), exchange)?;
+        let q = RabbitReceiver::create_queue(chan.clone(), queue)?;
+        RabbitReceiver::create_bindings(chan.clone(), queue, exchange)?;
+        RabbitReceiver::consume(chan.clone(), &q)?;
+
+        return Ok(RabbitReceiver{ chan: chan, count: 0});
+    }
+
+    /// Due to apparent deficiencies in Lapin, this won't return early when a connection is rejected.
+    fn get_connection(amqp: String, timeout: u64) -> Result<Connection, std::io::Error> {
         let (sender, receiver) = mpsc::channel();
 
         let _t = thread::spawn(move ||{
@@ -20,22 +45,53 @@ pub fn get_connection(amqp: String, timeout: u64) -> Result<Connection, String> 
                 .wait()
                 .expect("Failed connecting to rabbit");
             sender.send(conn).unwrap();
+            drop(sender);
         });
 
         return match receiver.recv_timeout(Duration::from_millis(timeout)) {
-            Ok(c) => Ok(c),
-            Err(_) => Err(String::from("Timed out connecting to rabbit")), 
+            Ok(conn) => Ok(conn),
+            Err(e) => Err(std::io::Error::new(std::io::ErrorKind::NotConnected, e)), 
         };
-}
+    }
 
-pub struct RabbitReceiver {
-    conn: Connection,
-    count: usize,
-}
+    /// Get a channel for the connection
+    fn get_channel(conn: Connection) -> Result<Channel, std::io::Error> {
+        return match conn.create_channel().wait() {
+            Ok(ch) => Ok(ch),
+            Err(e) => Err(std::io::Error::new(std::io::ErrorKind::NotConnected, e)),
+        };
+    }
 
-impl RabbitReceiver {
-    pub fn with_connection(conn: Connection) -> RabbitReceiver {
-        return RabbitReceiver{ conn: conn, count: 0};
+    /// Declare the named exchange, creating it if it doesn exist already.
+    fn create_exchange(chan: Rc<Channel>, exchange: &str) -> Result<&str, std::io::Error> {
+        return match chan.exchange_declare(exchange , ExchangeKind::Headers, ExchangeDeclareOptions::default(), FieldTable::default()).wait() {
+            Ok(_) => Ok(exchange),
+            Err(e) => Err(std::io::Error::new(std::io::ErrorKind::NotConnected, e)),
+        };
+    }
+
+    /// Declare the named queue (creating it if it doesn't exist)
+    fn create_queue(chan: Rc<Channel>, queue: &str) -> Result<Queue, std::io::Error> {
+        return match chan.queue_declare(queue, QueueDeclareOptions::default(), FieldTable::default()).wait() {
+            Ok(q) => Ok(q),
+            Err(e) => Err(std::io::Error::new(std::io::ErrorKind::NotConnected, e)),
+        };
+    }
+
+    fn create_bindings(chan: Rc<Channel>, queue: &str, exchange: &str) -> Result<(), std::io::Error> {
+        return match chan.queue_bind(queue, exchange, "", QueueBindOptions::default(), FieldTable::default()).wait() {
+            Ok(_) => Ok(()),
+            Err(e) => Err(std::io::Error::new(std::io::ErrorKind::NotConnected, e)),
+        };
+    }
+
+    fn consume(chan: Rc<Channel>, queue: &Queue) -> Result<(), std::io::Error> {
+        return match chan.basic_consume(queue, "switchboard", BasicConsumeOptions::default(), FieldTable::default()).wait() {
+            Ok(con) => Ok(con.set_delegate(Box::new(move| delivery: DeliveryResult |{
+                println!("received message: {:?}", delivery);
+            }))),
+            Err(e) => Err(std::io::Error::new(std::io::ErrorKind::NotConnected, e)),
+        };
     }
 }
 
@@ -65,7 +121,7 @@ impl Actor for RabbitReceiver {
     type Context = Context<Self>;
 }
 
-/// Message send to rabbit receiver to register another websocket on the switchboard.
+/// Message sent to rabbit receiver to register another websocket on the switchboard.
 #[derive(Clone, Debug, Message)]
 pub struct AddSocket {}
 

@@ -3,7 +3,6 @@
 
 use std::time::{Duration, Instant};
 use std::rc::Rc;
-use std::io;
 use log::{info, error};
 
 use actix::prelude::*;
@@ -110,35 +109,27 @@ fn main() -> std::io::Result<()> {
     env_logger::init();
     
     let amqp = std::env::var("AMQP_ADDR").unwrap_or_else(|_| "amqp://127.0.0.1:5672/%2f".into());
-    let timeout: u64 = 30000;
+    let timeout: u64 = 5000;
+    let sys = System::new("switchboard");    
 
     info!("Connecting to Rabbit..");
+    let rabbit = rabbit::RabbitReceiver::new(amqp, timeout, "switchboard", "switchboard")?.start();
+    info!("Connected to Rabbit");
 
-    return match rabbit::get_connection(amqp, timeout) {
-        Ok(conn) => {
-            info!("Connected to Rabbit");
-            let sys = System::new("switchboard");    
-            let rabbit = rabbit::RabbitReceiver::with_connection(conn).start();
+    let r = HttpServer::new(move || {
+        App::new()
+            .data(Rc::new(rabbit.clone()))
+            .wrap(middleware::Logger::default())
+            .service(web::resource("/ws/").route(web::get().to(ws_index)))
+            .service(fs::Files::new("/", "static/").index_file("index.html"))
+    })
+    // start http server on 127.0.0.1:8080
+    .bind("127.0.0.1:8080")?
+    .run();
 
-            let r = HttpServer::new(move || {
-                App::new()
-                    .data(Rc::new(rabbit.clone()))
-                    .wrap(middleware::Logger::default())
-                    .service(web::resource("/ws/").route(web::get().to(ws_index)))
-                    .service(fs::Files::new("/", "static/").index_file("index.html"))
-            })
-            // start http server on 127.0.0.1:8080
-            .bind("127.0.0.1:8080")?
-            .run();
-
-            return match r {
-                Err(e) => Err(e),
-                _ => sys.run()
-            };
-        },
-        Err(e) => {
-            error!("{}", e);
-            Err(io::Error::new(io::ErrorKind::NotConnected, e))
-        },
+    return match r {
+        Err(e) => Err(e),
+        _ => sys.run()
     };
+
 }
