@@ -6,19 +6,16 @@ use log::info;
 
 use actix::prelude::*;
 use actix_files as fs;
-use actix_web::{middleware, web, App, Error, HttpRequest, HttpResponse, HttpServer};
+use actix_web::{web, App, Error, HttpRequest, HttpResponse, HttpServer};
 use actix_web_actors::ws;
 
 mod actors;
-
 
 
 /// do websocket handshake and start `MyWebSocket` actor
 fn ws_index(r: HttpRequest, stream: web::Payload, data: web::Data<Rc<Addr<actors::RabbitReceiver>>>) -> Result<HttpResponse, Error> {
     return ws::start(actors::MyWebSocket::new(data.clone()), &r, stream);
 }
-
-
 
 fn main() -> std::io::Result<()> {
     std::env::set_var("RUST_LOG", "info,actix_server=info,actix_web=info");
@@ -35,7 +32,7 @@ fn main() -> std::io::Result<()> {
     let r = HttpServer::new(move || {
         App::new()
             .data(Rc::new(rabbit.clone()))
-            .wrap(middleware::Logger::default())
+            //.wrap(middleware::Logger::default()) // log the queries on the way through (spammy)
             .service(web::resource("/ws/").route(web::get().to(ws_index)))
             .service(fs::Files::new("/", "static/").index_file("index.html"))
     })
@@ -47,5 +44,4 @@ fn main() -> std::io::Result<()> {
         Err(e) => Err(e),
         _ => sys.run()
     };
-
 }
