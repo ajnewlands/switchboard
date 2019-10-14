@@ -1,24 +1,27 @@
-use actix::prelude::*;
 use uuid::Uuid;
-use lapin;
-use std::sync::mpsc;
+use std::sync::{Arc, mpsc};
 use std::thread;
-use std::time::Duration;
 use std::rc::Rc;
-use std::sync::Arc;
+use std::time::{Duration, Instant};
 
+use actix::prelude::*;
+use actix_web::web;
+use actix_web_actors::ws;
 
 use lapin::{
-  BasicProperties, Channel, Connection, ConnectionProperties, ConsumerDelegate,
-  message::{Delivery, DeliveryResult},
+  Channel, Connection, ConnectionProperties, 
+  message::DeliveryResult,
   types::FieldTable,
   ExchangeKind, options::*,
   Queue,
 };
 
+/// How often heartbeat pings are sent
+const HEARTBEAT_INTERVAL: Duration = Duration::from_secs(5);
+/// How long before lack of client response causes a timeout
+const CLIENT_TIMEOUT: Duration = Duration::from_secs(10);
 
 pub struct RabbitReceiver {
-    chan: Arc<Channel>,
     count: usize,
 }
 
@@ -26,12 +29,12 @@ impl RabbitReceiver {
     pub fn new(amqp: String, timeout: u64, exchange: &str, queue: &str) -> Result<RabbitReceiver, std::io::Error> {
         let conn = RabbitReceiver::get_connection(amqp, timeout)?;
         let chan = Arc::new(RabbitReceiver::get_channel(conn)?);
-        let ex = RabbitReceiver::create_exchange(chan.clone(), exchange)?;
+        let _ = RabbitReceiver::create_exchange(chan.clone(), exchange)?;
         let q = RabbitReceiver::create_queue(chan.clone(), queue)?;
         RabbitReceiver::create_bindings(chan.clone(), queue, exchange)?;
         RabbitReceiver::consume(chan.clone(), &q)?;
 
-        return Ok(RabbitReceiver{ chan: chan, count: 0});
+        return Ok(RabbitReceiver{ count: 0 });
     }
 
     /// Due to apparent deficiencies in Lapin, this won't return early when a connection is rejected.
@@ -123,9 +126,92 @@ impl Actor for RabbitReceiver {
 }
 
 /// Message sent to rabbit receiver to register another websocket on the switchboard.
-#[derive(Clone, Debug, Message)]
-pub struct AddSocket {}
+#[derive(Clone, Message)]
+pub struct AddSocket {
+    sender: Addr<MyWebSocket>,
+}
 
 /// Message sent to Rabbit Receiver to deregister a websocket on disconnection.
-#[derive(Clone, Debug, Message)]
+#[derive(Clone, Message)]
 pub struct DelSocket{}
+
+/// Actor implementing the websocket connection
+pub struct MyWebSocket {
+    /// Client must send ping at least once per 10 seconds (CLIENT_TIMEOUT),
+    hb: Instant,
+    rabbit: web::Data<Rc<Addr<RabbitReceiver>>>,
+}
+
+
+impl Actor for MyWebSocket {
+    type Context = ws::WebsocketContext<Self>;
+
+    /// Method is called on actor start. We start the heartbeat process here.
+    fn started(&mut self, ctx: &mut Self::Context) {
+        let addr = ctx.address();
+        self.rabbit.do_send(AddSocket{sender: addr});
+
+        self.hb(ctx);
+    }
+}
+
+/// Handler for `ws::Message`
+impl StreamHandler<ws::Message, ws::ProtocolError> for MyWebSocket {
+    fn handle(&mut self, msg: ws::Message, ctx: &mut Self::Context) {
+        // process websocket messages
+        println!("WS: {:?}", msg);
+        match msg {
+            ws::Message::Ping(msg) => {
+                self.hb = Instant::now();
+                ctx.pong(&msg);
+            }
+            ws::Message::Pong(_) => {
+                self.hb = Instant::now();
+            }
+            ws::Message::Text(text) => ctx.text(text),
+            ws::Message::Binary(bin) => ctx.binary(bin),
+            ws::Message::Close(_) => {
+                ctx.stop();
+            }
+            ws::Message::Nop => (),
+        }
+    }
+
+    fn started(&mut self, _ctx: &mut Self::Context) {
+        println!("websocket is started");
+    }
+}
+
+impl Drop for MyWebSocket {
+        fn drop(&mut self) {
+        println!("Dropping a websocket");
+        self.rabbit.do_send(DelSocket{});
+    }
+}
+
+impl MyWebSocket {    
+    pub fn new(addr: web::Data<Rc<Addr<RabbitReceiver>>>) -> Self {
+        Self { hb: Instant::now(), rabbit: addr }
+    }
+
+    /// helper method that sends ping to client every second.
+    ///
+    /// also this method checks heartbeats from client
+    fn hb(&self, ctx: &mut <Self as Actor>::Context) {
+        ctx.run_interval(HEARTBEAT_INTERVAL, |act, ctx| {
+            // check client heartbeats
+            if Instant::now().duration_since(act.hb) > CLIENT_TIMEOUT {
+                // heartbeat timed out
+                println!("Websocket Client heartbeat failed, disconnecting!");
+
+                // stop actor
+                ctx.stop();
+
+                // don't try to send a ping
+                return;
+            }
+
+            ctx.ping("");
+        });
+    }
+}
