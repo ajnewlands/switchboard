@@ -5,7 +5,7 @@ use std::rc::Rc;
 use std::time::{Duration, Instant};
 use std::collections::HashMap;
 use log::{info, warn, error};
-
+use serde_json::json;
 
 use actix::prelude::*;
 use actix_web::web;
@@ -14,7 +14,7 @@ use actix_web_actors::ws;
 use lapin::{
   Channel, Connection, ConnectionProperties, 
   message::DeliveryResult,
-  types::FieldTable,
+  types::{FieldTable, ShortString, AMQPValue, AMQPType},
   ExchangeKind, options::*,
   Queue,
 };
@@ -41,6 +41,7 @@ impl RabbitReceiver {
     }
 
     /// Due to apparent deficiencies in Lapin, this won't return early when a connection is rejected.
+    /// From experimentation, this seems to only be an issue on Windows (it will return immediately on Linux)
     fn get_connection(amqp: String, timeout: u64) -> Result<Connection, std::io::Error> {
         let (sender, receiver) = mpsc::channel();
         {
@@ -84,7 +85,11 @@ impl RabbitReceiver {
     }
 
     fn create_bindings(chan: Arc<Channel>, queue: &str, exchange: &str) -> Result<(), std::io::Error> {
-        return match chan.queue_bind(queue, exchange, "", QueueBindOptions::default(), FieldTable::default()).wait() {
+        let mut fields = FieldTable::default();
+        let j = json!("foo");
+        let v = AMQPValue::try_from(&j, AMQPType::LongString).unwrap();
+        fields.insert(ShortString::from("requestId"), v);
+        return match chan.queue_bind(queue, exchange, "", QueueBindOptions::default(), fields).wait() {
             Ok(_) => Ok(()),
             Err(e) => Err(std::io::Error::new(std::io::ErrorKind::NotConnected, e)),
         };

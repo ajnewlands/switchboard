@@ -22,7 +22,7 @@ fn main() -> std::io::Result<()> {
     env_logger::init();
     
     let amqp = std::env::var("AMQP_ADDR").unwrap_or_else(|_| "amqp://127.0.0.1:5672/%2f".into());
-    let timeout: u64 = 5000;
+    let timeout: u64 = 30000;
     let sys = System::new("switchboard");    
 
     info!("Connecting to Rabbit..");
