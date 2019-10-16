@@ -5,7 +5,6 @@ use std::rc::Rc;
 use std::time::{Duration, Instant};
 use std::collections::HashMap;
 use log::{info, warn, error};
-use serde_json::json;
 
 use actix::prelude::*;
 use actix_web::web;
@@ -14,10 +13,13 @@ use actix_web_actors::ws;
 use lapin::{
   Channel, Connection, ConnectionProperties, 
   message::DeliveryResult,
-  types::{FieldTable, ShortString, AMQPValue, AMQPType},
+  types::{FieldTable, ShortString},
   ExchangeKind, options::*,
-  Queue,
+  Queue, BasicProperties,
 };
+
+mod util;
+use util::string_to_header;
 
 /// How often heartbeat pings are sent
 const HEARTBEAT_INTERVAL: Duration = Duration::from_secs(5);
@@ -26,6 +28,9 @@ const CLIENT_TIMEOUT: Duration = Duration::from_secs(10);
 
 pub struct RabbitReceiver {
     sessions: HashMap<Uuid, Addr<MyWebSocket>>,
+    chan: Arc<Channel>,
+    id: String,
+    ex: String,
 }
 
 impl RabbitReceiver {
@@ -34,10 +39,17 @@ impl RabbitReceiver {
         let chan = Arc::new(RabbitReceiver::get_channel(conn)?);
         let _ = RabbitReceiver::create_exchange(chan.clone(), exchange)?;
         let q = RabbitReceiver::create_queue(chan.clone(), queue)?;
-        RabbitReceiver::create_bindings(chan.clone(), queue, exchange)?;
+        let id =  Uuid::new_v4().to_string();
+
+        RabbitReceiver::create_bindings(id.clone(), chan.clone(), queue, exchange)?;
         RabbitReceiver::consume(chan.clone(), &q)?;
 
-        return Ok(RabbitReceiver{ sessions: HashMap::with_capacity(64) });
+        return Ok(RabbitReceiver{ 
+            sessions: HashMap::with_capacity(64),
+            chan: chan.clone(),
+            id: id,
+            ex: String::from(exchange),
+            });
     }
 
     /// Due to apparent deficiencies in Lapin, this won't return early when a connection is rejected.
@@ -84,11 +96,10 @@ impl RabbitReceiver {
         };
     }
 
-    fn create_bindings(chan: Arc<Channel>, queue: &str, exchange: &str) -> Result<(), std::io::Error> {
+    fn create_bindings(id: String, chan: Arc<Channel>, queue: &str, exchange: &str) -> Result<(), std::io::Error> {
         let mut fields = FieldTable::default();
-        let j = json!("foo");
-        let v = AMQPValue::try_from(&j, AMQPType::LongString).unwrap();
-        fields.insert(ShortString::from("requestId"), v);
+        fields.insert(ShortString::from("dest_id"), string_to_header(&id));
+
         return match chan.queue_bind(queue, exchange, "", QueueBindOptions::default(), fields).wait() {
             Ok(_) => Ok(()),
             Err(e) => Err(std::io::Error::new(std::io::ErrorKind::NotConnected, e)),
@@ -96,7 +107,7 @@ impl RabbitReceiver {
     }
 
     fn consume(chan: Arc<Channel>, queue: &Queue) -> Result<(), std::io::Error> {
-        return match chan.basic_consume(queue, "switchboard", BasicConsumeOptions::default(), FieldTable::default()).wait() {
+        return match chan.basic_consume(queue, "", BasicConsumeOptions::default(), FieldTable::default()).wait() {
             Ok(con) => Ok(con.set_delegate(Box::new(move| delivery: DeliveryResult |{
                 match delivery {
                     Ok(Some(delivery)) => chan.basic_ack(delivery.delivery_tag, BasicAckOptions::default()).wait().expect("ACK failed"), // Got message
@@ -131,6 +142,23 @@ impl Handler<DelSocket> for RabbitReceiver {
     }
 }
 
+impl Handler<EchoRequest> for RabbitReceiver {
+    type Result = ();
+
+    fn handle(&mut self, msg: EchoRequest, _ctx: &mut Context<Self>) {
+        let mut headers = FieldTable::default();
+        headers.insert(ShortString::from("sender_id"), string_to_header(&self.id));
+        
+        let props = BasicProperties::default().with_headers(headers);
+
+        let payload = msg.content.into_bytes();
+        match self.chan.basic_publish(&self.ex, "", BasicPublishOptions::default(), payload, props).wait() {
+            Ok(_) => info!("sent msg to bus"),
+            Err(e) => error!("failed dispatch to bus: {}", e),
+        };
+    }
+}
+
 // Rabbit receiver object
 impl Actor for RabbitReceiver {
     type Context = Context<Self>;
@@ -151,6 +179,12 @@ pub struct AddSocket {
 #[derive(Clone, Message)]
 pub struct DelSocket{
     session_id: Uuid,
+}
+
+/// Simple message to trigger a dumb rabbit message
+#[derive(Clone, Message)]
+pub struct EchoRequest {
+    content: String,
 }
 
 /// Actor implementing the websocket connection
@@ -192,7 +226,7 @@ impl StreamHandler<ws::Message, ws::ProtocolError> for MyWebSocket {
             ws::Message::Pong(_) => {
                 self.hb = Instant::now();
             }
-            ws::Message::Text(text) => ctx.text(text),
+            ws::Message::Text(text) => self.rabbit.do_send(EchoRequest{content: text}),
             ws::Message::Binary(bin) => ctx.binary(bin),
             ws::Message::Close(_) => {
                 ctx.stop();

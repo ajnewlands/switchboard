@@ -1,6 +1,5 @@
 //! websocket <-> message queue switchboard
 //! Open `http://localhost:8080/ws/index.html` in browser to test
-
 use std::rc::Rc;
 use log::info;
 
