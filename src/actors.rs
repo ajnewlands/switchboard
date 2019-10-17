@@ -18,6 +18,10 @@ use lapin::{
   Queue, BasicProperties,
 };
 
+extern crate flatbuffers;
+mod messages_generated;
+use messages_generated::switchboard::*;
+
 mod util;
 use util::string_to_header;
 
@@ -174,6 +178,7 @@ pub struct AddSocket {
     sender: Addr<MyWebSocket>,
     session_id: Uuid,
 }
+
 
 /// Message sent to Rabbit Receiver to deregister a websocket on disconnection.
 #[derive(Clone, Message)]

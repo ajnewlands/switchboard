@@ -1,0 +1,9 @@
+namespace switchboard;
+
+enum Type:int16 { view=0 }
+
+table Msg {
+    type:Type = view;
+}
+
+root_type Msg;

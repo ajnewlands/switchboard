@@ -1,0 +1,14 @@
+building the flatbuffers schema:
+Rust
+flatc --rust -o src/actors messages.fbs
+
+Python
+flatc --python -o demo messages.fbs
+
+Concept: 
+
+(1)
+generate flatbuffer message from Python -> switchboard via bus -> determine type -> route to front-end
+generate flatbuffer message from JavaScript -> switchboard via socket -> determine type -> route to back-end.
+
+(2) Verify maximum rate at which messages of a representative size can be pushed through the actix framework.
