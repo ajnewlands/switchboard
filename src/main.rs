@@ -1,12 +1,13 @@
 //! websocket <-> message queue switchboard
 //! Open `http://localhost:8080/ws/index.html` in browser to test
 use std::rc::Rc;
-use log::info;
+use log::{info, warn};
 
 use actix::prelude::*;
 use actix_files as fs;
 use actix_web::{web, App, Error, HttpRequest, HttpResponse, HttpServer};
 use actix_web_actors::ws;
+use std::time::Duration;
 
 mod actors;
 
@@ -28,6 +29,12 @@ fn main() -> std::io::Result<()> {
     let rabbit = actors::RabbitReceiver::new(amqp, timeout, "switchboard", "switchboard")?.start();
     info!("Connected to Rabbit");
 
+    ctrlc::set_handler(|| {
+        warn!("Received interrupt; waiting 5 seconds to kick off connected clients");
+        std::thread::sleep(Duration::from_secs(5));
+        std::process::exit(1);
+    });
+
     let r = HttpServer::new(move || {
         App::new()
             .data(Rc::new(rabbit.clone()))
@@ -38,6 +45,7 @@ fn main() -> std::io::Result<()> {
     // start http server on 127.0.0.1:8080
     .bind("127.0.0.1:8080")?
     .run();
+
 
     return match r {
         Err(e) => Err(e),

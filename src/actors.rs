@@ -4,7 +4,7 @@ use std::thread;
 use std::rc::Rc;
 use std::time::{Duration, Instant};
 use std::collections::HashMap;
-use log::{info, warn, error};
+use log::{trace, info, warn, error};
 
 use actix::prelude::*;
 use actix_web::web;
@@ -86,7 +86,8 @@ impl RabbitReceiver {
 
     /// Declare the named exchange, creating it if it doesn exist already.
     fn create_exchange(chan: Arc<Channel>, exchange: &str) -> Result<&str, std::io::Error> {
-        return match chan.exchange_declare(exchange , ExchangeKind::Headers, ExchangeDeclareOptions::default(), FieldTable::default()).wait() {
+        let opts = ExchangeDeclareOptions{ passive:false, durable: false, auto_delete: true, internal:false, nowait:false };
+        return match chan.exchange_declare(exchange , ExchangeKind::Headers, opts, FieldTable::default()).wait() {
             Ok(_) => Ok(exchange),
             Err(e) => Err(std::io::Error::new(std::io::ErrorKind::NotConnected, e)),
         };
@@ -94,7 +95,8 @@ impl RabbitReceiver {
 
     /// Declare the named queue (creating it if it doesn't exist)
     fn create_queue(chan: Arc<Channel>, queue: &str) -> Result<Queue, std::io::Error> {
-        return match chan.queue_declare(queue, QueueDeclareOptions::default(), FieldTable::default()).wait() {
+        let opts = QueueDeclareOptions{ passive:false, durable:false, exclusive:false, auto_delete:true, nowait:false};
+        return match chan.queue_declare(queue, opts, FieldTable::default()).wait() {
             Ok(q) => Ok(q),
             Err(e) => Err(std::io::Error::new(std::io::ErrorKind::NotConnected, e)),
         };
@@ -113,8 +115,16 @@ impl RabbitReceiver {
     fn consume(chan: Arc<Channel>, queue: &Queue) -> Result<(), std::io::Error> {
         return match chan.basic_consume(queue, "", BasicConsumeOptions::default(), FieldTable::default()).wait() {
             Ok(con) => Ok(con.set_delegate(Box::new(move| delivery: DeliveryResult |{
+                info!("rabbit message arrived");
                 match delivery {
-                    Ok(Some(delivery)) => chan.basic_ack(delivery.delivery_tag, BasicAckOptions::default()).wait().expect("ACK failed"), // Got message
+                    Ok(Some(delivery)) => {
+                        let msg = get_root_as_msg(&delivery.data);
+                        info!("Message typ is {:?}", msg);
+                        if msg.content_type() == Content::Broadcast {
+                            info!("Broadcast: {:?}", msg.content_as_broadcast().unwrap().text());
+                        };
+                        chan.basic_ack(delivery.delivery_tag, BasicAckOptions::default()).wait().expect("ACK failed")
+                    }, // Got message
                     Ok(None) => info!("Consumer cancelled"), // Consumer cancelled
                     Err(e) => error!("Consumer error {}", e),
                 };
@@ -166,10 +176,6 @@ impl Handler<EchoRequest> for RabbitReceiver {
 // Rabbit receiver object
 impl Actor for RabbitReceiver {
     type Context = Context<Self>;
-
-    fn stopped(&mut self, _ctx: &mut Self::Context) {
-            info!("Stopped rabbit actor");
-    }
 }
 
 /// Message sent to rabbit receiver to register another websocket on the switchboard.

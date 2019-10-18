@@ -1,9 +1,17 @@
 namespace switchboard;
 
-enum Type:int16 { view=0 }
+union Content { ViewUpdate, Broadcast }
+
+table Broadcast {
+    text:string;
+}
+
+table ViewUpdate {
+    data:[ubyte];
+}
 
 table Msg {
-    type:Type = view;
+    content:Content;
 }
 
 root_type Msg;
