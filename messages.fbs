@@ -11,6 +11,7 @@ table ViewUpdate {
 }
 
 table Msg {
+    session:string;
     content:Content;
 }
 

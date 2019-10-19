@@ -46,6 +46,8 @@ impl RabbitReceiver {
         let q = RabbitReceiver::create_queue(chan.clone(), queue)?;
         let id =  Uuid::new_v4().to_string();
 
+        info!("Service registered with id {}", id);
+
         RabbitReceiver::create_bindings(id.clone(), chan.clone(), queue, exchange)?;
         RabbitReceiver::consume(chan.clone(), &q)?;
 
@@ -116,13 +118,16 @@ impl RabbitReceiver {
     fn consume(chan: Arc<Channel>, queue: &Queue) -> Result<(), std::io::Error> {
         return match chan.basic_consume(queue, "", BasicConsumeOptions::default(), FieldTable::default()).wait() {
             Ok(con) => Ok(con.set_delegate(Box::new(move| delivery: DeliveryResult |{
-                info!("rabbit message arrived");
                 match delivery {
                     Ok(Some(delivery)) => {
-                        let msg = get_root_as_msg(&delivery.data);
-                        info!("Message typ is {:?}", msg);
+                        // TODO decompose this
+                        // TODO use panic::catch_unwind to avoid exploding when buffer is not a
+                        // flatbuffer
+                        let msg = get_root_as_msg(&delivery.data); 
+                        debug!("Message type is {:?}", msg.content_type());
                         if msg.content_type() == Content::Broadcast {
-                            info!("Broadcast: {:?}", msg.content_as_broadcast().unwrap().text());
+                            let session = msg.session().unwrap();
+                            info!("Broadcast: {} to {}", msg.content_as_broadcast().unwrap().text().unwrap(), session);
                         };
                         chan.basic_ack(delivery.delivery_tag, BasicAckOptions::default()).wait().expect("ACK failed")
                     }, // Got message
@@ -141,7 +146,7 @@ impl Handler<AddSocket> for RabbitReceiver {
 
     fn handle(&mut self, msg: AddSocket, _ctx: &mut Context<Self>)  {
         self.sessions.insert(msg.session_id, msg.sender);
-        debug!("Connected sockets now {}, added session {}", self.sessions.len(), msg.session_id);
+        info!("Connected sockets now {}, added session {}", self.sessions.len(), msg.session_id);
     }
 }
 
