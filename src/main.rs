@@ -18,7 +18,7 @@ fn ws_index(r: HttpRequest, stream: web::Payload, data: web::Data<Rc<Addr<actors
 }
 
 fn main() -> std::io::Result<()> {
-    std::env::set_var("RUST_LOG", "info,actix_server=info,actix_web=info");
+    std::env::set_var("RUST_LOG", "debug,actix_server=info,actix_web=info");
     env_logger::init();
     
     let amqp = std::env::var("AMQP_ADDR").unwrap_or_else(|_| "amqp://127.0.0.1:5672/%2f".into());
@@ -28,12 +28,6 @@ fn main() -> std::io::Result<()> {
     info!("Connecting to Rabbit..");
     let rabbit = actors::RabbitReceiver::new(amqp, timeout, "switchboard", "switchboard")?.start();
     info!("Connected to Rabbit");
-
-    ctrlc::set_handler(|| {
-        warn!("Received interrupt; waiting 5 seconds to kick off connected clients");
-        std::thread::sleep(Duration::from_secs(5));
-        std::process::exit(1);
-    });
 
     let r = HttpServer::new(move || {
         App::new()
@@ -46,9 +40,6 @@ fn main() -> std::io::Result<()> {
     .bind("127.0.0.1:8080")?
     .run();
 
-
-    return match r {
-        Err(e) => Err(e),
-        _ => sys.run()
-    };
+    info!("now running");
+    Ok(())
 }

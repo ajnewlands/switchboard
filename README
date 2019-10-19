@@ -5,6 +5,11 @@ flatc --rust -o src/actors messages.fbs
 Python
 flatc --python -o demo messages.fbs
 
+JavaScript
+flatc --js -o static messages.fbs
+
+N.B. flatbuffers.js comes from the flatbuffers git repo, copied here purely for convenience (ref https://github.com/google/flatbuffers/tree/master/js).
+
 Concept: 
 
 (1)
