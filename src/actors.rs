@@ -129,7 +129,7 @@ impl RabbitReceiver {
                         if msg.content_type() == Content::Broadcast {
                             let session = msg.session().unwrap();
                             match sessions.lock().unwrap().get(session) {
-                                Some(address) => address.do_send(BroadcastMessage{ msg: delivery.data }), // TODO Arc? Box?
+                                Some(address) => address.do_send(FlatbuffMessage{ flatbuffer: delivery.data }), 
                                 None => warn!("Received message for non-existent session {} in {:?}", session, sessions.lock().unwrap().keys()),
                             };
                             //info!("Broadcast: {} to {}", msg.content_as_broadcast().unwrap().text().unwrap(), session);
@@ -225,10 +225,10 @@ pub struct EchoRequest {
     content: String,
 }
 
-/// Hand off Broadcast flatbuffer message to websocket session
+/// Hand off flatbuffer message to websocket session
 #[derive(Clone, Message)]
-pub struct BroadcastMessage {
-    msg: Vec<u8>,
+pub struct FlatbuffMessage {
+    flatbuffer: Vec<u8>,
 }
 
 
@@ -282,11 +282,13 @@ impl StreamHandler<ws::Message, ws::ProtocolError> for MyWebSocket {
 }
 
 
-impl Handler<BroadcastMessage> for MyWebSocket {
+impl Handler<FlatbuffMessage> for MyWebSocket {
     type Result = ();
 
-    fn handle(&mut self, msg: BroadcastMessage, _ctx: &mut Self::Context) {
-        info!("socket got a broadcast..");
+    fn handle(&mut self, msg: FlatbuffMessage, ctx: &mut Self::Context) {
+        let root = get_root_as_msg(&msg.flatbuffer); 
+        info!("Message passed from Rabbit->Websocket, type is {:?}", root.content_type());
+        ctx.binary(msg.flatbuffer);
     }
 }
 
