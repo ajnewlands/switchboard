@@ -161,8 +161,9 @@ impl Handler<DelSocket> for RabbitReceiver {
     type Result = ();
 
     fn handle (&mut self, msg: DelSocket, _ctx: &mut Context<Self>)  {
-        match self.sessions.lock().unwrap().remove(&(msg.session_id.to_string())) {
-            Some(_) => info!("Removed session {}, remaining sessions {}", msg.session_id, self.sessions.lock().unwrap().len()),
+        let mut locked = self.sessions.lock().unwrap();
+        match locked.remove(&(msg.session_id.to_string())) {
+            Some(_) => info!("Removed session {}, remaining sessions {}", msg.session_id, locked.len()),
             None => warn!("Got disconnect for non-existent session {}", msg.session_id),
         };
     }
