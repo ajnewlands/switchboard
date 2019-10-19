@@ -132,7 +132,6 @@ impl RabbitReceiver {
                                 Some(address) => address.do_send(FlatbuffMessage{ flatbuffer: delivery.data }), 
                                 None => warn!("Received message for non-existent session {} in {:?}", session, sessions.lock().unwrap().keys()),
                             };
-                            //info!("Broadcast: {} to {}", msg.content_as_broadcast().unwrap().text().unwrap(), session);
                         };
                         chan.basic_ack(delivery.delivery_tag, BasicAckOptions::default()).wait().expect("ACK failed")
                     }, // Got message
@@ -152,7 +151,7 @@ impl Handler<AddSocket> for RabbitReceiver {
 
     fn handle(&mut self, msg: AddSocket, _ctx: &mut Context<Self>)  {
         self.sessions.lock().unwrap().insert(msg.session_id.to_string(), msg.sender);
-        info!("Connected sockets now {}, added session {}", self.sessions.lock().unwrap().len(), msg.session_id);
+        debug!("Connected sockets now {}, added session {}", self.sessions.lock().unwrap().len(), msg.session_id);
     }
 }
 
@@ -163,7 +162,7 @@ impl Handler<DelSocket> for RabbitReceiver {
     fn handle (&mut self, msg: DelSocket, _ctx: &mut Context<Self>)  {
         let mut locked = self.sessions.lock().unwrap();
         match locked.remove(&(msg.session_id.to_string())) {
-            Some(_) => info!("Removed session {}, remaining sessions {}", msg.session_id, locked.len()),
+            Some(_) => debug!("Removed session {}, remaining sessions {}", msg.session_id, locked.len()),
             None => warn!("Got disconnect for non-existent session {}", msg.session_id),
         };
     }
@@ -180,7 +179,7 @@ impl Handler<EchoRequest> for RabbitReceiver {
 
         let payload = msg.content.into_bytes();
         match self.chan.basic_publish(&self.ex, "", BasicPublishOptions::default(), payload, props).wait() {
-            Ok(_) => info!("sent msg to bus"),
+            Ok(_) => debug!("sent msg to bus"),
             Err(e) => error!("failed dispatch to bus: {}", e),
         };
     }
@@ -288,7 +287,7 @@ impl Handler<FlatbuffMessage> for MyWebSocket {
 
     fn handle(&mut self, msg: FlatbuffMessage, ctx: &mut Self::Context) {
         let root = get_root_as_msg(&msg.flatbuffer); 
-        info!("Message passed from Rabbit->Websocket, type is {:?}", root.content_type());
+        debug!("Message passed from Rabbit->Websocket, type is {:?}, size is {}", root.content_type(), msg.flatbuffer.len());
         ctx.binary(msg.flatbuffer);
     }
 }
