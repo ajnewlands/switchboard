@@ -1,5 +1,5 @@
 use uuid::Uuid;
-use std::sync::{Arc, mpsc};
+use std::sync::{Arc, Mutex, mpsc};
 use std::thread;
 use std::rc::Rc;
 use std::time::{Duration, Instant};
@@ -32,10 +32,11 @@ const HEARTBEAT_INTERVAL: Duration = Duration::from_secs(5);
 const CLIENT_TIMEOUT: Duration = Duration::from_secs(10);
 
 pub struct RabbitReceiver {
-    sessions: HashMap<Uuid, Addr<MyWebSocket>>,
+    sessions: Arc<Mutex<HashMap<String, Addr<MyWebSocket>>>>,
     chan: Arc<Channel>,
     id: String,
     ex: String,
+    q: Queue,
 }
 
 impl RabbitReceiver {
@@ -49,13 +50,13 @@ impl RabbitReceiver {
         info!("Service registered with id {}", id);
 
         RabbitReceiver::create_bindings(id.clone(), chan.clone(), queue, exchange)?;
-        RabbitReceiver::consume(chan.clone(), &q)?;
 
         return Ok(RabbitReceiver{ 
-            sessions: HashMap::with_capacity(64),
+            sessions: Arc::new(Mutex::new(HashMap::with_capacity(64))),
             chan: chan.clone(),
             id: id,
             ex: String::from(exchange),
+            q: q,
             });
     }
 
@@ -115,9 +116,9 @@ impl RabbitReceiver {
         };
     }
 
-    fn consume(chan: Arc<Channel>, queue: &Queue) -> Result<(), std::io::Error> {
+    fn consume(sessions: Arc<Mutex<HashMap<String, Addr<MyWebSocket>>>>, chan: Arc<Channel>, queue: &Queue) -> Result<(), std::io::Error> {
         return match chan.basic_consume(queue, "", BasicConsumeOptions::default(), FieldTable::default()).wait() {
-            Ok(con) => Ok(con.set_delegate(Box::new(move| delivery: DeliveryResult |{
+            Ok(con) => Ok(con.set_delegate(Box::new(move | delivery: DeliveryResult |{ 
                 match delivery {
                     Ok(Some(delivery)) => {
                         // TODO decompose this
@@ -127,7 +128,11 @@ impl RabbitReceiver {
                         debug!("Message type is {:?}", msg.content_type());
                         if msg.content_type() == Content::Broadcast {
                             let session = msg.session().unwrap();
-                            info!("Broadcast: {} to {}", msg.content_as_broadcast().unwrap().text().unwrap(), session);
+                            match sessions.lock().unwrap().get(session) {
+                                Some(address) => address.do_send(BroadcastMessage{ msg: delivery.data }), // TODO Arc? Box?
+                                None => warn!("Received message for non-existent session {} in {:?}", session, sessions.lock().unwrap().keys()),
+                            };
+                            //info!("Broadcast: {} to {}", msg.content_as_broadcast().unwrap().text().unwrap(), session);
                         };
                         chan.basic_ack(delivery.delivery_tag, BasicAckOptions::default()).wait().expect("ACK failed")
                     }, // Got message
@@ -140,13 +145,14 @@ impl RabbitReceiver {
     }
 }
 
+
 /// Each time a new websocket is created, store it's address and session id.
 impl Handler<AddSocket> for RabbitReceiver {
     type Result = ();
 
     fn handle(&mut self, msg: AddSocket, _ctx: &mut Context<Self>)  {
-        self.sessions.insert(msg.session_id, msg.sender);
-        info!("Connected sockets now {}, added session {}", self.sessions.len(), msg.session_id);
+        self.sessions.lock().unwrap().insert(msg.session_id.to_string(), msg.sender);
+        info!("Connected sockets now {}, added session {}", self.sessions.lock().unwrap().len(), msg.session_id);
     }
 }
 
@@ -155,8 +161,8 @@ impl Handler<DelSocket> for RabbitReceiver {
     type Result = ();
 
     fn handle (&mut self, msg: DelSocket, _ctx: &mut Context<Self>)  {
-        match self.sessions.remove(&(msg.session_id)) {
-            Some(_) => info!("Removed session {}, remaining sessions {}", msg.session_id, self.sessions.len()),
+        match self.sessions.lock().unwrap().remove(&(msg.session_id.to_string())) {
+            Some(_) => info!("Removed session {}, remaining sessions {}", msg.session_id, self.sessions.lock().unwrap().len()),
             None => warn!("Got disconnect for non-existent session {}", msg.session_id),
         };
     }
@@ -182,6 +188,13 @@ impl Handler<EchoRequest> for RabbitReceiver {
 // Rabbit receiver object
 impl Actor for RabbitReceiver {
     type Context = Context<Self>;
+
+    fn started(&mut self, _ctx: &mut Self::Context) {
+        match RabbitReceiver::consume(self.sessions.clone(), self.chan.clone(), &self.q) {
+            Ok(_) => info!("Starting Rabbit consumption"),
+            Err(e) => panic!("Unable to consume from rabbit: {}", e),
+        };
+    }
 
     fn stopped(&mut self, _ctx: &mut Self::Context) {
         match self.chan.close(503, "Service shut down").wait() {
@@ -211,6 +224,13 @@ pub struct DelSocket{
 pub struct EchoRequest {
     content: String,
 }
+
+/// Hand off Broadcast flatbuffer message to websocket session
+#[derive(Clone, Message)]
+pub struct BroadcastMessage {
+    msg: Vec<u8>,
+}
+
 
 /// Actor implementing the websocket connection
 pub struct MyWebSocket {
@@ -258,6 +278,15 @@ impl StreamHandler<ws::Message, ws::ProtocolError> for MyWebSocket {
             }
             ws::Message::Nop => (),
         }
+    }
+}
+
+
+impl Handler<BroadcastMessage> for MyWebSocket {
+    type Result = ();
+
+    fn handle(&mut self, msg: BroadcastMessage, _ctx: &mut Self::Context) {
+        info!("socket got a broadcast..");
     }
 }
 
