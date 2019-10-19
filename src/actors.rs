@@ -34,15 +34,14 @@ const CLIENT_TIMEOUT: Duration = Duration::from_secs(10);
 pub struct RabbitReceiver {
     sessions: HashMap<Uuid, Addr<MyWebSocket>>,
     chan: Arc<Channel>,
-    conn: Arc<Connection>,
     id: String,
     ex: String,
 }
 
 impl RabbitReceiver {
     pub fn new(amqp: String, timeout: u64, exchange: &str, queue: &str) -> Result<RabbitReceiver, std::io::Error> {
-        let conn = Arc::new(RabbitReceiver::get_connection(amqp, timeout)?);
-        let chan = Arc::new(RabbitReceiver::get_channel(conn.clone())?);
+        let conn = RabbitReceiver::get_connection(amqp, timeout)?;
+        let chan = Arc::new(RabbitReceiver::get_channel(conn)?);
         let _ = RabbitReceiver::create_exchange(chan.clone(), exchange)?;
         let q = RabbitReceiver::create_queue(chan.clone(), queue)?;
         let id =  Uuid::new_v4().to_string();
@@ -51,7 +50,6 @@ impl RabbitReceiver {
         RabbitReceiver::consume(chan.clone(), &q)?;
 
         return Ok(RabbitReceiver{ 
-            conn: conn.clone(),
             sessions: HashMap::with_capacity(64),
             chan: chan.clone(),
             id: id,
@@ -80,7 +78,7 @@ impl RabbitReceiver {
     }
 
     /// Get a channel for the connection
-    fn get_channel(conn: Arc<Connection>) -> Result<Channel, std::io::Error> {
+    fn get_channel(conn: Connection) -> Result<Channel, std::io::Error> {
         return match conn.create_channel().wait() {
             Ok(ch) => Ok(ch),
             Err(e) => Err(std::io::Error::new(std::io::ErrorKind::NotConnected, e)),
@@ -181,8 +179,10 @@ impl Actor for RabbitReceiver {
     type Context = Context<Self>;
 
     fn stopped(&mut self, _ctx: &mut Self::Context) {
-        self.chan.close(503, "Service shut down");
-        self.conn.close(503, "Service shut down");
+        match self.chan.close(503, "Service shut down").wait() {
+            Ok(_) => (),
+            Err(e) => warn!("Attempted to close rabbit channel but got: {}", e),
+        };
         debug!("Stopped rabbit receiver");
     }
 }
