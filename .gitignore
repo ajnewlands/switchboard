@@ -1,5 +1,6 @@
 /target
-/demo/switchboard/__pycache__
 **/*.rs.bk
 **/messages_generated.*
-**/*.pyc
+/demo/switchboard/__pycache__
+/demo/switchboard/Msg.py
+example1.PNG
