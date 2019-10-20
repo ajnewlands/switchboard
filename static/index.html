@@ -25,13 +25,17 @@
                               update_ui();
                             };
                     conn.onmessage = function(e) {
-                                log('Received: ' + e.data);
-                                log(' size ' + e.data.byteLength);
-                                var array = new Uint8Array(e.data);
-                                var buf = new flatbuffers.ByteBuffer(array);
-                                var msg = switchboard.Msg.getRootAsMsg(buf);
-                                log('Type is ' + msg.contentType());
-                            };
+                        // reconstitute the structure from the flatbuffer.
+                        var array = new Uint8Array(e.data);
+                        var buf = new flatbuffers.ByteBuffer(array);
+                        var msg = switchboard.Msg.getRootAsMsg(buf);
+
+                        log('Received message, type ' + msg.contentType());
+                        if (msg.contentType() == switchboard.Content.Broadcast) {
+                            var text = msg.content(new switchboard.Broadcast()).text();
+                            log('Broadcast received: ' + text);
+                        }
+                    };
                     conn.onclose = function() {
                               log('Disconnected.');
                               conn = null;
