@@ -129,7 +129,7 @@ impl RabbitReceiver {
                         if msg.content_type() == Content::Broadcast {
                             let session = msg.session().unwrap();
                             match sessions.read().unwrap().get(session) {
-                                Some(address) => address.do_send(FlatbuffMessage{ flatbuffer: delivery.data }), 
+                                Some(address) => address.do_send(FlatbuffMessage{ flatbuffer: delivery.data, session: String::new() }), 
                                 None => warn!("Received message for non-existent session {} in {:?}", session, sessions.read().unwrap().keys()),
                             };
                         };
@@ -164,6 +164,24 @@ impl Handler<DelSocket> for RabbitReceiver {
         match locked.remove(&(msg.session_id.to_string())) {
             Some(_) => debug!("Removed session {}, remaining sessions {}", msg.session_id, locked.len()),
             None => warn!("Got disconnect for non-existent session {}", msg.session_id),
+        };
+    }
+}
+
+impl Handler<FlatbuffMessage> for RabbitReceiver {
+    type Result = ();
+
+    fn handle(&mut self, msg: FlatbuffMessage, _ctx: &mut Context<Self>) {
+        let mut headers = FieldTable::default();
+        headers.insert(ShortString::from("sender_id"), string_to_header(&self.id));
+        headers.insert(ShortString::from("session"), string_to_header(&msg.session));
+        
+        let props = BasicProperties::default().with_headers(headers);
+
+        let payload = msg.flatbuffer;
+        match self.chan.basic_publish(&self.ex, "", BasicPublishOptions::default(), payload, props).wait() {
+            Ok(_) => debug!("sent msg to bus"),
+            Err(e) => error!("failed dispatch to bus: {}", e),
         };
     }
 }
@@ -225,10 +243,11 @@ pub struct EchoRequest {
     content: String,
 }
 
-/// Hand off flatbuffer message to websocket session
+/// Hand off flatbuffer message between actors
 #[derive(Clone, Message)]
 pub struct FlatbuffMessage {
     flatbuffer: Vec<u8>,
+    session: String,
 }
 
 
@@ -238,6 +257,14 @@ pub struct MyWebSocket {
     hb: Instant,
     rabbit: web::Data<Rc<Addr<RabbitReceiver>>>,
     id: Uuid,
+}
+
+impl MyWebSocket {
+    fn process_buffer(& self, data: bytes::Bytes) {
+        let msg = get_root_as_msg(&data); 
+        debug!("Websocket received message, type is {:?}", msg.content_type());
+        self.rabbit.do_send(FlatbuffMessage{ flatbuffer: data.to_vec(), session: self.id.to_string() });        
+    }
 }
 
 
@@ -272,7 +299,7 @@ impl StreamHandler<ws::Message, ws::ProtocolError> for MyWebSocket {
                 self.hb = Instant::now();
             }
             ws::Message::Text(text) => self.rabbit.do_send(EchoRequest{content: text}),
-            ws::Message::Binary(bin) => ctx.binary(bin),
+            ws::Message::Binary(bin) => self.process_buffer(bin), //ctx.binary(bin),
             ws::Message::Close(_) => {
                 ctx.stop();
             }

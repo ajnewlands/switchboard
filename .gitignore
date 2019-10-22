@@ -2,5 +2,5 @@
 **/*.rs.bk
 **/messages_generated.*
 /demo/switchboard/__pycache__
-/demo/switchboard/Msg.py
+/demo/switchboard/*.py
 example1.PNG

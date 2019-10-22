@@ -1,18 +1,34 @@
 namespace switchboard;
 
-union Content { ViewUpdate, Broadcast }
+union Content { ViewStart, ViewUpdate, ViewEnd, Broadcast }
 
 table Broadcast {
-    text:string;
+    text: string;
+}
+
+table ViewStart {
+    capabilities:uint; // e.g. does it support incremental updates, different encodings..
+}
+
+table ViewEnd { } // it merely is..
+
+table ViewAck {
+  sqn: uint;
 }
 
 table ViewUpdate {
-    data:[ubyte];
+    sqn: uint; // assue nobody ever requires more than 2 billion updates.
+    incremental: bool = true; // assume that incremental updates are more frequent that initial/full.
+    data: [ubyte];
 }
 
+
+// on later consideration, the session should be a rabbit header, not part of the buffer.
+// this is so that we do not depend on the front-end to know or populate the header,
+// nor require the switchboard to mutate (i.e. create a copy of) the flatbuffer to add it en passant.
 table Msg {
-    session:string;
-    content:Content;
+    session: string;
+    content: Content;
 }
 
 root_type Msg;

@@ -17,7 +17,7 @@ fn ws_index(r: HttpRequest, stream: web::Payload, data: web::Data<Rc<Addr<actors
 }
 
 fn main() -> std::io::Result<()> {
-    std::env::set_var("RUST_LOG", "debug,tokio_reactor=info,actix_server=info,actix_web=info");
+    std::env::set_var("RUST_LOG", "debug,lapin=info,tokio_reactor=info,actix_server=info,actix_web=info");
     env_logger::init();
     let _ = System::new("switchboard");
     

@@ -30,7 +30,7 @@
                         var buf = new flatbuffers.ByteBuffer(array);
                         var msg = switchboard.Msg.getRootAsMsg(buf);
 
-                        log('Received message, type ' + msg.contentType());
+                        log('Received message, type ' + switchboard.ContentName[msg.contentType()]);
                         if (msg.contentType() == switchboard.Content.Broadcast) {
                             var text = msg.content(new switchboard.Broadcast()).text();
                             log('Broadcast received: ' + text);
@@ -76,6 +76,26 @@
                     $('#text').val('').focus();
                     return false;
                       });
+                $('#start_view').click(function() {
+                    log('Starting view updates.');
+
+                    var builder = new flatbuffers.Builder(1024);
+
+                    // create the viewstart value
+                    switchboard.ViewStart.startViewStart(builder);
+                    var viewstart = switchboard.ViewStart.endViewStart(builder);
+
+                    // start creating the message itself
+                    switchboard.Msg.startMsg(builder);
+                    switchboard.Msg.addContentType(builder, switchboard.Content.ViewStart);
+                    switchboard.Msg.addContent(builder, viewstart);
+                    var message = switchboard.Msg.endMsg(builder);
+                    builder.finish(message);
+
+                    var buf = builder.asUint8Array();
+                    conn.send(buf);
+                    return true;
+                });
                 $('#text').keyup(function(e) {
                     if (e.keyCode === 13) {
                               $('#send').click();
@@ -92,11 +112,12 @@
         <span id="status">disconnected</span>
     </div>
     <div id="log"
-          style="width:20em;height:15em;overflow:auto;border:1px solid black">
+          style="width:40em;height:15em;overflow:auto;border:1px solid black">
     </div>
     <form id="chatform" onsubmit="return false;">
           <input id="text" type="text" />
         <input id="send" type="button" value="Send" />
+        <input id="start_view" type="button" value="Start View" />
     </form>
     </body>
 </html>
