@@ -109,6 +109,7 @@ impl RabbitReceiver {
     fn create_bindings(id: String, chan: Arc<Channel>, queue: &str, exchange: &str) -> Result<(), std::io::Error> {
         let mut fields = FieldTable::default();
         fields.insert(ShortString::from("dest_id"), string_to_header(&id));
+        fields.insert(ShortString::from("type"), string_to_header("ViewUpdate"));
 
         return match chan.queue_bind(queue, exchange, "", QueueBindOptions::default(), fields).wait() {
             Ok(_) => Ok(()),
@@ -121,17 +122,20 @@ impl RabbitReceiver {
             Ok(con) => Ok(con.set_delegate(Box::new(move | delivery: DeliveryResult |{ 
                 match delivery {
                     Ok(Some(delivery)) => {
+                        // TODO error checking here
+                        let headers = delivery.properties.headers().as_ref().unwrap().inner();
+                        let session = match &headers["session"] {
+                            lapin::types::AMQPValue::LongString(s) => s.as_str(),
+                            _ => "",
+                        };
                         // TODO decompose this
                         // TODO use panic::catch_unwind to avoid exploding when buffer is not a
                         // flatbuffer
                         let msg = get_root_as_msg(&delivery.data); 
-                        debug!("Message type is {:?}", msg.content_type());
-                        if msg.content_type() == Content::Broadcast {
-                            let session = msg.session().unwrap();
-                            match sessions.read().unwrap().get(session) {
-                                Some(address) => address.do_send(FlatbuffMessage{ flatbuffer: delivery.data, session: String::new() }), 
-                                None => warn!("Received message for non-existent session {} in {:?}", session, sessions.read().unwrap().keys()),
-                            };
+                        debug!("Got rabbit message, type is {:?}", msg.content_type());
+                        match sessions.read().unwrap().get(session) {
+                            Some(address) => address.do_send(FlatbuffMessage{ flatbuffer: delivery.data, session: String::new() }), 
+                            None => warn!("Received message for non-existent session {} in {:?}", session, sessions.read().unwrap().keys()),
                         };
                         chan.basic_ack(delivery.delivery_tag, BasicAckOptions::default()).wait().expect("ACK failed")
                     }, // Got message
@@ -173,8 +177,10 @@ impl Handler<FlatbuffMessage> for RabbitReceiver {
 
     fn handle(&mut self, msg: FlatbuffMessage, _ctx: &mut Context<Self>) {
         let mut headers = FieldTable::default();
+        let root = get_root_as_msg(&msg.flatbuffer); 
         headers.insert(ShortString::from("sender_id"), string_to_header(&self.id));
         headers.insert(ShortString::from("session"), string_to_header(&msg.session));
+        headers.insert(ShortString::from("type"), string_to_header(& enum_name_content(root.content_type())));
         
         let props = BasicProperties::default().with_headers(headers);
 

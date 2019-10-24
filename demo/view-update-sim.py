@@ -11,23 +11,65 @@ import switchboard.ViewUpdate as ViewUpdate
 import switchboard.ViewAck as ViewAck
 import switchboard.ViewStart as ViewStart
 import switchboard.ViewEnd as ViewEnd
-from switchboard.Msg import Msg
-
-connection = pika.BlockingConnection( pika.ConnectionParameters(host='localhost'))
-channel = connection.channel()
-
-channel.queue_declare(queue='view')
-channel.queue_bind(queue='view', exchange='switchboard', routing_key='')
+import switchboard.Msg as Msg
+import switchboard.Content as Content
 
 
-def callback(ch, method, properties, body):
-    print("Headers %r" % properties.headers)
-    session = properties.headers["session"]
-    message = Msg.GetRootAsMsg(body, 0)
-    print("Got message for session %s", session);
+class handler(object):
+    def __init__(self):
+        self.sqn = 0
+
+    def dispatchMsg(self, dest_id, session_id, msg):
+        channel.basic_publish(
+            exchange='switchboard', 
+            routing_key='', 
+            properties = pika.BasicProperties(
+                headers = { 'dest_id': dest_id, 'type': 'ViewUpdate', 'session': session_id }
+                ),
+            body=msg)
+
+    def getViewUpdateMsg(self):
+        builder =flatbuffers.Builder(1024) # python is missing a Clear() method to reuse?
+        ViewUpdate.ViewUpdateStart(builder)
+        ViewUpdate.ViewUpdateAddSqn(builder, self.sqn)
+        self.sqn +=1
+        ViewUpdate.ViewUpdateAddIncremental(builder, False)
+        viewupdate = ViewUpdate.ViewUpdateEnd(builder)
+
+        Msg.MsgStart(builder)
+        Msg.MsgAddContentType(builder, Content.Content().ViewUpdate)
+        Msg.MsgAddContent(builder, viewupdate)
+        msg = Msg.MsgEnd(builder)
+
+        builder.Finish(msg)
+        return builder.Output() 
 
 
-channel.basic_consume(queue='view', on_message_callback=callback, auto_ack=True)
 
-print(' [*] Waiting for messages. To exit press CTRL+C')
-channel.start_consuming()
+
+    def callback(self, ch, method, properties, body):
+        print("Headers %r" % properties.headers)
+        session = properties.headers["session"]
+        sender = properties.headers["sender_id"]
+        message = Msg.Msg.GetRootAsMsg(body, 0)
+        print("Got message for session ", session);
+        view = self.getViewUpdateMsg()
+        self.dispatchMsg(sender, session, view)
+
+
+if __name__== "__main__":
+    connection = pika.BlockingConnection( pika.ConnectionParameters(host='localhost'))
+    channel = connection.channel()
+    handler = handler();
+
+    channel.queue_declare(queue='view', auto_delete=True)
+    channel.queue_bind(queue='view', exchange='switchboard', routing_key='', arguments={'type': 'ViewStart'})
+    channel.queue_bind(queue='view', exchange='switchboard', routing_key='', arguments={'type': 'ViewAck'})
+    channel.queue_bind(queue='view', exchange='switchboard', routing_key='', arguments={'type': 'ViewEnd'})
+
+    channel.basic_consume(queue='view', on_message_callback=handler.callback, auto_ack=True)
+
+    print(' [*] Waiting for messages. To exit press CTRL+C')
+    channel.start_consuming()
+
+
