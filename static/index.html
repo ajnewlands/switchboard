@@ -30,10 +30,29 @@
                         var buf = new flatbuffers.ByteBuffer(array);
                         var msg = switchboard.Msg.getRootAsMsg(buf);
 
-                        log('Received message, type ' + switchboard.ContentName[msg.contentType()]);
-                        if (msg.contentType() == switchboard.Content.Broadcast) {
+                        //log('Received message, type ' + switchboard.ContentName[msg.contentType()]);
+                        if (msg.contentType() == switchboard.Content.ViewUpdate) {
+                            var builder = new flatbuffers.Builder(1024);
+
+                            // create the viewstart value
+                            var view_ack = switchboard.ViewAck.createViewAck(builder, 0);
+
+                            // start creating the message itself
+                            switchboard.Msg.startMsg(builder);
+                            switchboard.Msg.addContentType(builder, switchboard.Content.ViewAck);
+                            switchboard.Msg.addContent(builder, view_ack);
+                            var message = switchboard.Msg.endMsg(builder);
+                            builder.finish(message);
+
+                            var ack = builder.asUint8Array();
+                            conn.send(ack);
+                        }
+                        else if (msg.contentType() == switchboard.Content.Broadcast) {
                             var text = msg.content(new switchboard.Broadcast()).text();
                             log('Broadcast received: ' + text);
+                        }
+                        else {
+                            log('unhandled type');
                         }
                     };
                     conn.onclose = function() {

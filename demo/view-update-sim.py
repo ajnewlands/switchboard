@@ -5,7 +5,9 @@
 # Will dispatch ViewUpdate in response to ViewStart and ViewAck
 #
 
+import sys
 import pika
+import time as time
 import flatbuffers
 import switchboard.ViewUpdate as ViewUpdate
 import switchboard.ViewAck as ViewAck
@@ -17,6 +19,7 @@ import switchboard.Content as Content
 
 class handler(object):
     def __init__(self):
+        self.started = 0
         self.sqn = 0
 
     def dispatchMsg(self, dest_id, session_id, msg):
@@ -48,13 +51,22 @@ class handler(object):
 
 
     def callback(self, ch, method, properties, body):
-        print("Headers %r" % properties.headers)
+        if (self.started == 0):
+            self.started = time.time()
+            print("Started test")
+        #print("Headers %r" % properties.headers)
         session = properties.headers["session"]
         sender = properties.headers["sender_id"]
         message = Msg.Msg.GetRootAsMsg(body, 0)
-        print("Got message for session ", session);
+        #print("Got message for session ", session);
         view = self.getViewUpdateMsg()
         self.dispatchMsg(sender, session, view)
+        if (self.sqn == 1000):
+            end_time = time.time()
+            delta_ms = (end_time - self.started) * 1000
+            ops_second = (self.sqn / delta_ms) * 1000
+            print("Completed after %f ms, %f round trips per second" %( delta_ms, ops_second ))
+            sys.exit(0)
 
 
 if __name__== "__main__":

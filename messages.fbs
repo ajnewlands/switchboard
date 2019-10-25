@@ -1,6 +1,6 @@
 namespace switchboard;
 
-union Content { ViewStart, ViewUpdate, ViewEnd, Broadcast }
+union Content { ViewStart, ViewUpdate, ViewAck, ViewEnd, Broadcast }
 
 table Broadcast {
     text: string;
