@@ -33,7 +33,8 @@ const CLIENT_TIMEOUT: Duration = Duration::from_secs(10);
 
 pub struct RabbitReceiver {
     sessions: Arc<RwLock<HashMap<String, Addr<MyWebSocket>>>>,
-    chan: Arc<Channel>,
+    rchan: Arc<Channel>,
+    wchan: Arc<Channel>,
     id: String,
     ex: String,
     q: Queue,
@@ -41,19 +42,22 @@ pub struct RabbitReceiver {
 
 impl RabbitReceiver {
     pub fn new(amqp: String, timeout: u64, exchange: &str, queue: &str) -> Result<RabbitReceiver, std::io::Error> {
-        let conn = RabbitReceiver::get_connection(amqp, timeout)?;
-        let chan = Arc::new(RabbitReceiver::get_channel(conn)?);
-        let _ = RabbitReceiver::create_exchange(chan.clone(), exchange)?;
-        let q = RabbitReceiver::create_queue(chan.clone(), queue)?;
+        let rconn = RabbitReceiver::get_connection(amqp.clone(), timeout)?;
+        let wconn = RabbitReceiver::get_connection(amqp, timeout)?;
+        let rchan = Arc::new(RabbitReceiver::get_channel(&rconn)?);
+        let wchan = Arc::new(RabbitReceiver::get_channel(&wconn)?);
+        let _ = RabbitReceiver::create_exchange(rchan.clone(), exchange)?;
+        let q = RabbitReceiver::create_queue(rchan.clone(), queue)?;
         let id =  Uuid::new_v4().to_string();
 
         info!("Service registered with id {}", id);
 
-        RabbitReceiver::create_bindings(id.clone(), chan.clone(), queue, exchange)?;
+        RabbitReceiver::create_bindings(id.clone(), rchan.clone(), queue, exchange)?;
 
         return Ok(RabbitReceiver{ 
             sessions: Arc::new(RwLock::new(HashMap::with_capacity(64))),
-            chan: chan.clone(),
+            rchan: rchan.clone(),
+            wchan: wchan.clone(),
             id: id,
             ex: String::from(exchange),
             q: q,
@@ -81,9 +85,12 @@ impl RabbitReceiver {
     }
 
     /// Get a channel for the connection
-    fn get_channel(conn: Connection) -> Result<Channel, std::io::Error> {
+    fn get_channel(conn: &Connection) -> Result<Channel, std::io::Error> {
         return match conn.create_channel().wait() {
-            Ok(ch) => Ok(ch),
+            Ok(ch) => match ch.basic_qos( 30, BasicQosOptions::default()).wait() {
+                    Ok(_) => Ok(ch),
+                    Err(e) => Err(std::io::Error::new(std::io::ErrorKind::NotConnected, e)), 
+            },
             Err(e) => Err(std::io::Error::new(std::io::ErrorKind::NotConnected, e)),
         };
     }
@@ -118,7 +125,8 @@ impl RabbitReceiver {
     }
 
     fn consume(sessions: Arc<RwLock<HashMap<String, Addr<MyWebSocket>>>>, chan: Arc<Channel>, queue: &Queue) -> Result<(), std::io::Error> {
-        return match chan.basic_consume(queue, "", BasicConsumeOptions::default(), FieldTable::default()).wait() {
+        let opts = BasicConsumeOptions{ no_local: true, no_ack: false, exclusive: false, nowait: false };
+        return match chan.basic_consume(queue, "", opts, FieldTable::default()).wait() {
             Ok(con) => Ok(con.set_delegate(Box::new(move | delivery: DeliveryResult |{ 
                 match delivery {
                     Ok(Some(delivery)) => {
@@ -185,7 +193,7 @@ impl Handler<FlatbuffMessage> for RabbitReceiver {
         let props = BasicProperties::default().with_headers(headers);
 
         let payload = msg.flatbuffer;
-        match self.chan.basic_publish(&self.ex, "", BasicPublishOptions::default(), payload.to_vec(), props).wait() {
+        match self.wchan.basic_publish(&self.ex, "", BasicPublishOptions::default(), payload.to_vec(), props).wait() {
             Ok(_) => debug!("sent msg to bus"),
             Err(e) => error!("failed dispatch to bus: {}", e),
         };
@@ -202,7 +210,7 @@ impl Handler<EchoRequest> for RabbitReceiver {
         let props = BasicProperties::default().with_headers(headers);
 
         let payload = msg.content.into_bytes();
-        match self.chan.basic_publish(&self.ex, "", BasicPublishOptions::default(), payload, props).wait() {
+        match self.wchan.basic_publish(&self.ex, "", BasicPublishOptions::default(), payload, props).wait() {
             Ok(_) => debug!("sent msg to bus"),
             Err(e) => error!("failed dispatch to bus: {}", e),
         };
@@ -214,14 +222,18 @@ impl Actor for RabbitReceiver {
     type Context = Context<Self>;
 
     fn started(&mut self, _ctx: &mut Self::Context) {
-        match RabbitReceiver::consume(self.sessions.clone(), self.chan.clone(), &self.q) {
+        match RabbitReceiver::consume(self.sessions.clone(), self.rchan.clone(), &self.q) {
             Ok(_) => info!("Starting Rabbit consumption"),
             Err(e) => panic!("Unable to consume from rabbit: {}", e),
         };
     }
 
     fn stopped(&mut self, _ctx: &mut Self::Context) {
-        match self.chan.close(503, "Service shut down").wait() {
+        match self.wchan.close(503, "Service shut down").wait() {
+            Ok(_) => (),
+            Err(e) => warn!("Attempted to close rabbit channel but got: {}", e),
+        };
+        match self.rchan.close(503, "Service shut down").wait() {
             Ok(_) => (),
             Err(e) => warn!("Attempted to close rabbit channel but got: {}", e),
         };

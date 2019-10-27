@@ -16,7 +16,6 @@ import switchboard.ViewEnd as ViewEnd
 import switchboard.Msg as Msg
 import switchboard.Content as Content
 
-
 class handler(object):
     def __init__(self):
         self.started = 0
