@@ -134,7 +134,7 @@ impl RabbitReceiver {
                         let msg = get_root_as_msg(&delivery.data); 
                         debug!("Got rabbit message, type is {:?}", msg.content_type());
                         match sessions.read().unwrap().get(session) {
-                            Some(address) => address.do_send(FlatbuffMessage{ flatbuffer: delivery.data, session: String::new() }), 
+                            Some(address) => address.do_send(FlatbuffMessage{ flatbuffer: bytes::Bytes::from(delivery.data), session: String::new() }), 
                             None => warn!("Received message for non-existent session {} in {:?}", session, sessions.read().unwrap().keys()),
                         };
                         chan.basic_ack(delivery.delivery_tag, BasicAckOptions::default()).wait().expect("ACK failed")
@@ -185,7 +185,7 @@ impl Handler<FlatbuffMessage> for RabbitReceiver {
         let props = BasicProperties::default().with_headers(headers);
 
         let payload = msg.flatbuffer;
-        match self.chan.basic_publish(&self.ex, "", BasicPublishOptions::default(), payload, props).wait() {
+        match self.chan.basic_publish(&self.ex, "", BasicPublishOptions::default(), payload.to_vec(), props).wait() {
             Ok(_) => debug!("sent msg to bus"),
             Err(e) => error!("failed dispatch to bus: {}", e),
         };
@@ -252,7 +252,7 @@ pub struct EchoRequest {
 /// Hand off flatbuffer message between actors
 #[derive(Clone, Message)]
 pub struct FlatbuffMessage {
-    flatbuffer: Vec<u8>,
+    flatbuffer: bytes::Bytes,
     session: String,
 }
 
@@ -269,7 +269,7 @@ impl MyWebSocket {
     fn process_buffer(& self, data: bytes::Bytes) {
         let msg = get_root_as_msg(&data); 
         debug!("Websocket received message, type is {:?}", msg.content_type());
-        self.rabbit.do_send(FlatbuffMessage{ flatbuffer: data.to_vec(), session: self.id.to_string() });        
+        self.rabbit.do_send(FlatbuffMessage{ flatbuffer: data, session: self.id.to_string() } );
     }
 }
 
@@ -305,7 +305,7 @@ impl StreamHandler<ws::Message, ws::ProtocolError> for MyWebSocket {
                 self.hb = Instant::now();
             }
             ws::Message::Text(text) => self.rabbit.do_send(EchoRequest{content: text}),
-            ws::Message::Binary(bin) => self.process_buffer(bin), //ctx.binary(bin),
+            ws::Message::Binary(bin) => self.process_buffer(bin), 
             ws::Message::Close(_) => {
                 ctx.stop();
             }

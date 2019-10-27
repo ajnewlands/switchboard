@@ -9,6 +9,21 @@
       <script language="javascript" type="text/javascript">
           $(function() {
                 var conn = null;
+                var builder = new flatbuffers.Builder(1024);
+
+                //pre-create an ACK to minimize turn around time.
+                // create the viewstart value
+                var view_ack = switchboard.ViewAck.createViewAck(builder, 0);
+
+                // start creating the message itself
+                switchboard.Msg.startMsg(builder);
+                switchboard.Msg.addContentType(builder, switchboard.Content.ViewAck);
+                switchboard.Msg.addContent(builder, view_ack);
+                var message = switchboard.Msg.endMsg(builder);
+                builder.finish(message);
+
+                var ack = builder.asUint8Array();
+
                 function log(msg) {
                     var control = $('#log');
                     control.html(control.html() + msg + '<br/>');
@@ -32,19 +47,7 @@
 
                         //log('Received message, type ' + switchboard.ContentName[msg.contentType()]);
                         if (msg.contentType() == switchboard.Content.ViewUpdate) {
-                            var builder = new flatbuffers.Builder(1024);
 
-                            // create the viewstart value
-                            var view_ack = switchboard.ViewAck.createViewAck(builder, 0);
-
-                            // start creating the message itself
-                            switchboard.Msg.startMsg(builder);
-                            switchboard.Msg.addContentType(builder, switchboard.Content.ViewAck);
-                            switchboard.Msg.addContent(builder, view_ack);
-                            var message = switchboard.Msg.endMsg(builder);
-                            builder.finish(message);
-
-                            var ack = builder.asUint8Array();
                             conn.send(ack);
                         }
                         else if (msg.contentType() == switchboard.Content.Broadcast) {
@@ -97,8 +100,6 @@
                       });
                 $('#start_view').click(function() {
                     log('Starting view updates.');
-
-                    var builder = new flatbuffers.Builder(1024);
 
                     // create the viewstart value
                     switchboard.ViewStart.startViewStart(builder);

@@ -21,6 +21,7 @@ class handler(object):
     def __init__(self):
         self.started = 0
         self.sqn = 0
+        self.premade_message = None
 
     def dispatchMsg(self, dest_id, session_id, msg):
         channel.basic_publish(
@@ -31,11 +32,12 @@ class handler(object):
                 ),
             body=msg)
 
-    def getViewUpdateMsg(self):
+    def getViewUpdateMsg(self, png_payload, sqn):
         builder =flatbuffers.Builder(1024) # python is missing a Clear() method to reuse?
+        data = builder.CreateByteVector(png_payload)
         ViewUpdate.ViewUpdateStart(builder)
-        ViewUpdate.ViewUpdateAddSqn(builder, self.sqn)
-        self.sqn +=1
+        ViewUpdate.ViewUpdateAddSqn(builder, sqn)
+        ViewUpdate.ViewUpdateAddData(builder, data)
         ViewUpdate.ViewUpdateAddIncremental(builder, False)
         viewupdate = ViewUpdate.ViewUpdateEnd(builder)
 
@@ -59,8 +61,9 @@ class handler(object):
         sender = properties.headers["sender_id"]
         message = Msg.Msg.GetRootAsMsg(body, 0)
         #print("Got message for session ", session);
-        view = self.getViewUpdateMsg()
-        self.dispatchMsg(sender, session, view)
+        #view = self.getViewUpdateMsg()
+        self.dispatchMsg(sender, session, self.premade_message)
+        self.sqn += 1
         if (self.sqn == 1000):
             end_time = time.time()
             delta_ms = (end_time - self.started) * 1000
@@ -70,11 +73,16 @@ class handler(object):
 
 
 if __name__== "__main__":
+    png_payload = None
+    with open('example1.PNG', 'rb') as file:
+        png_payload = file.read()
+
     connection = pika.BlockingConnection( pika.ConnectionParameters(host='localhost'))
     channel = connection.channel()
     handler = handler();
+    handler.premade_message = handler.getViewUpdateMsg(png_payload, 0)
 
-    channel.queue_declare(queue='view', auto_delete=True)
+    channel.queue_declare(queue='view', auto_delete=True, durable=False)
     channel.queue_bind(queue='view', exchange='switchboard', routing_key='', arguments={'type': 'ViewStart'})
     channel.queue_bind(queue='view', exchange='switchboard', routing_key='', arguments={'type': 'ViewAck'})
     channel.queue_bind(queue='view', exchange='switchboard', routing_key='', arguments={'type': 'ViewEnd'})
