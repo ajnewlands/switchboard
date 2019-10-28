@@ -130,11 +130,14 @@ impl RabbitReceiver {
             Ok(con) => Ok(con.set_delegate(Box::new(move | delivery: DeliveryResult |{ 
                 match delivery {
                     Ok(Some(delivery)) => {
-                        // TODO error checking here
-                        let headers = delivery.properties.headers().as_ref().unwrap().inner();
-                        let session = match &headers["session"] {
-                            lapin::types::AMQPValue::LongString(s) => s.as_str(),
-                            _ => "",
+                        // either extract the session from the header, or default to empty string
+                        // (which will then fail the lookup below)
+                        let session = match delivery.properties.headers().as_ref() {
+                            None => "",
+                            Some(headers) => match &(headers.inner())["session"]  {
+                                lapin::types::AMQPValue::LongString(s) => s.as_str(),
+                                _ => "",
+                            },
                         };
                         // TODO decompose this
                         // TODO use panic::catch_unwind to avoid exploding when buffer is not a

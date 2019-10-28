@@ -17,7 +17,10 @@ fn ws_index(r: HttpRequest, stream: web::Payload, data: web::Data<Rc<Addr<actors
 }
 
 fn main() -> std::io::Result<()> {
-    std::env::set_var("RUST_LOG", "info,lapin=info,tokio_reactor=info,actix_server=info,actix_web=info");
+    match std::env::var_os("RUST_LOG") {
+        Some(_) => (),
+        None => std::env::set_var("RUST_LOG", "info,lapin=info,tokio_reactor=info,actix_server=info,actix_web=info"),
+    };
     env_logger::init();
     let _ = System::new("switchboard");
     
@@ -36,7 +39,7 @@ fn main() -> std::io::Result<()> {
             .service(fs::Files::new("/", "static/").index_file("index.html"))
     })
     // start http server on 127.0.0.1:8080
-    .bind("127.0.0.1:8080")?
+    .bind("0.0.0.0:8080")?
     .run()?;
 
     Ok(())
