@@ -116,6 +116,12 @@
                     conn.send(buf);
                     return true;
                 });
+                $('#send_invalid').click(function() {
+                    log('sending something invalid');
+                    var array = new Uint8Array();
+                    var buf = new flatbuffers.ByteBuffer(array);
+                    conn.send(buf);
+                });
                 $('#text').keyup(function(e) {
                     if (e.keyCode === 13) {
                               $('#send').click();
@@ -138,6 +144,7 @@
           <input id="text" type="text" />
         <input id="send" type="button" value="Send" />
         <input id="start_view" type="button" value="Start View" />
+        <input id="send_invalid" type="button" value="send invalid" />
     </form>
     </body>
 </html>

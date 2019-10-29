@@ -1,6 +1,7 @@
 use uuid::Uuid;
 use std::sync::{Arc, RwLock, mpsc};
 use std::thread;
+use std::panic;
 use std::rc::Rc;
 use std::time::{Duration, Instant};
 use std::collections::HashMap;
@@ -139,15 +140,20 @@ impl RabbitReceiver {
                                 _ => "",
                             },
                         };
-                        // TODO decompose this
-                        // TODO use panic::catch_unwind to avoid exploding when buffer is not a
-                        // flatbuffer
-                        let msg = get_root_as_msg(&delivery.data); 
-                        debug!("Got rabbit message, type is {:?}", msg.content_type());
-                        match sessions.read().unwrap().get(session) {
-                            Some(address) => address.do_send(FlatbuffMessage{ flatbuffer: bytes::Bytes::from(delivery.data), session: String::new() }), 
-                            None => warn!("Received message for non-existent session {} in {:?}", session, sessions.read().unwrap().keys()),
+                        // reading the flatbuffer will panic if it is invalid; catch_unwind will
+                        // prevent the program from summarily aborting.
+                        match panic::catch_unwind(|| get_root_as_msg(&delivery.data)) {
+                            Ok(msg) => { 
+                                debug!("Got rabbit message, type is {:?}", msg.content_type());
+                                match sessions.read().unwrap().get(session) {
+                                    Some(address) => address.do_send(FlatbuffMessage{ flatbuffer: bytes::Bytes::from(delivery.data), session: String::new() }), 
+                                    None => warn!("Received message for non-existent session {} in {:?}", session, sessions.read().unwrap().keys()),
+                                };
+                            },
+                            Err(_) => error!("Dropping an invalid message buffer"),
                         };
+
+                        // TODO don't panic
                         chan.basic_ack(delivery.delivery_tag, BasicAckOptions::default()).wait().expect("ACK failed")
                     }, // Got message
                     Ok(None) => info!("Consumer cancelled"), // Consumer cancelled
@@ -195,8 +201,7 @@ impl Handler<FlatbuffMessage> for RabbitReceiver {
         
         let props = BasicProperties::default().with_headers(headers);
 
-        let payload = msg.flatbuffer;
-        match self.wchan.basic_publish(&self.ex, "", BasicPublishOptions::default(), payload.to_vec(), props).wait() {
+        match self.wchan.basic_publish(&self.ex, "", BasicPublishOptions::default(), msg.flatbuffer.to_vec(), props).wait() {
             Ok(_) => debug!("sent msg to bus"),
             Err(e) => error!("failed dispatch to bus: {}", e),
         };
