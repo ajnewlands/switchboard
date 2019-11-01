@@ -59,9 +59,9 @@ impl RabbitReceiver {
             sessions: Arc::new(RwLock::new(HashMap::with_capacity(64))),
             rchan: rchan.clone(),
             wchan: wchan.clone(),
-            id: id,
+            id,
             ex: String::from(exchange),
-            q: q,
+            q,
             });
     }
 
@@ -156,7 +156,7 @@ impl RabbitReceiver {
                         // TODO don't panic
                         chan.basic_ack(delivery.delivery_tag, BasicAckOptions::default()).wait().expect("ACK failed")
                     }, // Got message
-                    Ok(None) => info!("Consumer cancelled"), // Consumer cancelled
+                    Ok(None) =>  error!("Consumer cancelled"), // Consumer cancelled
                     Err(e) => error!("Consumer error {}", e),
                 };
             }))),
