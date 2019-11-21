@@ -1,8 +1,9 @@
 use uuid::Uuid;
-use std::sync::{Arc, RwLock, mpsc};
+use std::sync::{Arc, RwLock};
 use std::thread;
 use std::panic;
 use std::rc::Rc;
+use std::cell::RefCell;
 use std::time::{Duration, Instant};
 use std::collections::HashMap;
 use log::{debug, info, warn, error};
@@ -11,157 +12,158 @@ use actix::prelude::*;
 use actix_web::web;
 use actix_web_actors::ws;
 
-use lapin::{
-  Channel, Connection, ConnectionProperties, 
-  message::DeliveryResult,
-  types::{FieldTable, ShortString},
-  ExchangeKind, options::*,
-  Queue, BasicProperties,
-};
+use crossbeam_channel::{unbounded, Receiver, Sender, select};
+
+use amiquip::{Connection, Publish, ConsumerMessage, ConsumerOptions, QueueDeclareOptions, ExchangeType, ExchangeDeclareOptions, FieldTable, AmqpValue, AmqpProperties, Channel };
 
 extern crate flatbuffers;
+use flatbuffers::FlatBufferBuilder;
 #[allow(unused_imports)]
 mod messages_generated;
 use messages_generated::switchboard::*;
-
-mod util;
-use util::string_to_header;
 
 /// How often heartbeat pings are sent
 const HEARTBEAT_INTERVAL: Duration = Duration::from_secs(5);
 /// How long before lack of client response causes a timeout
 const CLIENT_TIMEOUT: Duration = Duration::from_secs(10);
 
+/// AMIQUIP based rabbit handler
+struct Rabbit {
+    chan: Rc<Channel>,
+    _conn: Rc<RefCell<Connection>>,
+    rx: Receiver<FlatbuffMessage>,
+    ex: String,
+    id: String,
+}
+unsafe impl Send for Rabbit{}
+
+impl Rabbit {
+    pub fn new( amqp: &str, exchange: &str, queue: &str, rx: Receiver<FlatbuffMessage>) -> Result<Rabbit, String> {
+        let conn = Rc::new( 
+            RefCell::new(
+                Connection::insecure_open(amqp)
+                    .map_err(|e| format!("Failed to open rabbit connection: {:?}", e))?
+                )
+            );
+
+        let chan = Rc::new(
+            conn.borrow_mut().open_channel(None)
+                .map_err(|e| format!("Failed to open rabbit channel: {:?}", e))?
+            );
+
+
+        let id = Uuid::new_v4().to_string();
+        let rabbit = Rabbit { chan, _conn: conn, rx, ex: String::from(exchange), id };
+
+        rabbit.declare_exchange(exchange)?;
+        rabbit.bind(queue, exchange)?;
+
+        return Ok(rabbit);
+    }
+
+    fn declare_exchange(&self, exchange: &str) -> Result<(), String> {
+        let opts = ExchangeDeclareOptions{ durable: false, auto_delete: true, internal:false, arguments: FieldTable::default() };
+        self.chan.exchange_declare(ExchangeType::Headers, exchange, opts)
+            .map_err(|e| format!("Failed to create exchange {}: {:?}", exchange, e))?;
+
+        Ok(())
+    }
+
+    fn bind(&self, queue: &str, exchange: &str) -> Result<(), String> {
+        let mut fields = FieldTable::default();
+        fields.insert( String::from("type"), AmqpValue::LongString(String::from("ViewUpdate")));
+        fields.insert( String::from("dest_id"), AmqpValue::LongString(self.id.clone()));
+
+        let opts = QueueDeclareOptions{ durable: false, exclusive: false, auto_delete: true, arguments: FieldTable::default() };
+        self.chan.queue_declare(queue,  opts)
+            .map_err(|e| format!("Failed to create queue {}: {:?}", queue, e))?;
+
+        self.chan.queue_bind( queue, exchange, "", fields )
+            .map_err(|e| format!("Failed to bind queue {}: {:?}", queue, e))?;
+        info!("Service registered with id {}", self.id);
+        Ok(())
+    }
+
+    fn consume(&self, queue: &str, addr: Arc<Addr<RabbitReceiver>>) -> Result<(), String> {
+        let opts = QueueDeclareOptions{ durable: false, exclusive: false, auto_delete: true, arguments: FieldTable::default() };
+        let q = self.chan.queue_declare(queue,  opts)
+            .map_err(|e| format!("Failed to create queue {}: {:?}", queue, e))?;
+
+        let rabbit = q.consume(ConsumerOptions::default())
+            .map_err(|e| format!("Could not start rabbit consumer: {:?}", e))?;
+
+        info!("Starting consuming rabbit messages");
+
+        
+        loop { // obviously this won't shut down gracefully..
+            select! {
+                recv(*rabbit.receiver()) -> r => match r {
+                    Ok(ConsumerMessage::Delivery(msg)) => {
+                        match msg.properties.headers().as_ref(){
+                            None => warn!("Disregarding message without headers"),
+                            Some(headers) => {
+                                if let AmqpValue::LongString(session) = &headers["session"] {
+                                    debug!("Got a message for session {}", session);
+                                    match panic::catch_unwind(|| get_root_as_msg(&msg.body)) {
+                                        Ok(root) => { 
+                                            debug!("Got rabbit message, type is {:?}, at {}", root.content_type(), (std::time::SystemTime::now().duration_since(std::time::SystemTime::UNIX_EPOCH).unwrap().as_millis()));
+                                            addr.do_send(WebsocketMessage{ flatbuffer: bytes::Bytes::from(msg.body), session: session.to_string() });
+                                        },
+                                        Err(_) => error!("Dropping an invalid message buffer"),
+                                    };
+                                } else {
+                                    warn!("disregarding message without a session header");
+                                }
+                            },
+                        };
+                    },
+                    e => {
+                        error!("Rabbit connection closed, stopping event loop: {:?}", e);
+                        break;
+                    }
+                },
+                recv(self.rx) -> r => match r { // either got a message from the websocket side or channel closure
+                    Ok(msg) => {
+                        let mut headers = FieldTable::default();
+                        let root = get_root_as_msg(&msg.flatbuffer); 
+                        headers.insert(String::from("sender_id"), AmqpValue::LongString( self.id.clone() ));
+                        headers.insert(String::from("session"), AmqpValue::LongString(msg.session));
+                        headers.insert(String::from("type"), AmqpValue::LongString(enum_name_content(root.content_type()).to_string()));
+                 
+                        let props = AmqpProperties::default().with_headers(headers);
+                        let opts = Publish{ body: &msg.flatbuffer, routing_key: String::from(""), mandatory: false, immediate: false, properties: props };
+                        self.chan.basic_publish( self.ex.clone(), opts );
+                
+                        debug!("Wrote {:?} to bus", root.content_type());
+                    },
+                    Err(e) => {
+                        error!("Websocket channel closed, stopping event loop: {:?}", e);
+                        break;
+                    },
+                },
+            }
+        }
+
+        Ok(())
+    }
+}
+
+/// END AMIQUIP rabbit handler
+
 pub struct RabbitReceiver {
     sessions: Arc<RwLock<HashMap<String, Addr<MyWebSocket>>>>,
-    rchan: Arc<Channel>,
-    wchan: Arc<Channel>,
-    id: String,
-    ex: String,
-    q: Queue,
+    rabbit: Option<thread::JoinHandle<()>>,
+    tx: Option<Sender<FlatbuffMessage>>,
 }
 
 impl RabbitReceiver {
-    pub fn new(amqp: String, timeout: u64, exchange: &str, queue: &str) -> Result<RabbitReceiver, std::io::Error> {
-        let rconn = RabbitReceiver::get_connection(amqp.clone(), timeout)?;
-        let wconn = RabbitReceiver::get_connection(amqp, timeout)?;
-        let rchan = Arc::new(RabbitReceiver::get_channel(&rconn)?);
-        let wchan = Arc::new(RabbitReceiver::get_channel(&wconn)?);
-        let _ = RabbitReceiver::create_exchange(rchan.clone(), exchange)?;
-        let q = RabbitReceiver::create_queue(rchan.clone(), queue)?;
-        let id =  Uuid::new_v4().to_string();
-
-        info!("Service registered with id {}", id);
-
-        RabbitReceiver::create_bindings(id.clone(), rchan.clone(), queue, exchange)?;
+    pub fn new(amqp: String, exchange: String, queue: String) -> Result<RabbitReceiver, String> {
 
         return Ok(RabbitReceiver{ 
             sessions: Arc::new(RwLock::new(HashMap::with_capacity(64))),
-            rchan: rchan.clone(),
-            wchan: wchan.clone(),
-            id,
-            ex: String::from(exchange),
-            q,
+            rabbit: None,
+            tx: None,
             });
-    }
-
-    /// Due to apparent deficiencies in Lapin, this won't return early when a connection is rejected.
-    /// From experimentation, this seems to only be an issue on Windows (it will return immediately on Linux)
-    fn get_connection(amqp: String, timeout: u64) -> Result<Connection, std::io::Error> {
-        let (sender, receiver) = mpsc::channel();
-        {
-            let _t = thread::spawn(move ||{
-                let conn = Connection::connect(&amqp, ConnectionProperties::default());
-                match conn.wait() {
-                    Ok(conn) => sender.send(conn).unwrap(),
-                    Err(_) => drop(sender),
-                };
-            });
-        }
-
-        return match receiver.recv_timeout(Duration::from_millis(timeout)) {
-            Ok(conn) => Ok(conn),
-            Err(e) => Err(std::io::Error::new(std::io::ErrorKind::NotConnected, e)), 
-        };
-    }
-
-    /// Get a channel for the connection
-    fn get_channel(conn: &Connection) -> Result<Channel, std::io::Error> {
-        return match conn.create_channel().wait() {
-            Ok(ch) => match ch.basic_qos( 30, BasicQosOptions::default()).wait() {
-                    Ok(_) => Ok(ch),
-                    Err(e) => Err(std::io::Error::new(std::io::ErrorKind::NotConnected, e)), 
-            },
-            Err(e) => Err(std::io::Error::new(std::io::ErrorKind::NotConnected, e)),
-        };
-    }
-
-    /// Declare the named exchange, creating it if it doesn exist already.
-    fn create_exchange(chan: Arc<Channel>, exchange: &str) -> Result<&str, std::io::Error> {
-        let opts = ExchangeDeclareOptions{ passive:false, durable: false, auto_delete: true, internal:false, nowait:false };
-        return match chan.exchange_declare(exchange , ExchangeKind::Headers, opts, FieldTable::default()).wait() {
-            Ok(_) => Ok(exchange),
-            Err(e) => Err(std::io::Error::new(std::io::ErrorKind::NotConnected, e)),
-        };
-    }
-
-    /// Declare the named queue (creating it if it doesn't exist)
-    fn create_queue(chan: Arc<Channel>, queue: &str) -> Result<Queue, std::io::Error> {
-        let opts = QueueDeclareOptions{ passive:false, durable:false, exclusive:false, auto_delete:true, nowait:false};
-        return match chan.queue_declare(queue, opts, FieldTable::default()).wait() {
-            Ok(q) => Ok(q),
-            Err(e) => Err(std::io::Error::new(std::io::ErrorKind::NotConnected, e)),
-        };
-    }
-
-    fn create_bindings(id: String, chan: Arc<Channel>, queue: &str, exchange: &str) -> Result<(), std::io::Error> {
-        let mut fields = FieldTable::default();
-        fields.insert(ShortString::from("dest_id"), string_to_header(&id));
-        fields.insert(ShortString::from("type"), string_to_header("ViewUpdate"));
-
-        return match chan.queue_bind(queue, exchange, "", QueueBindOptions::default(), fields).wait() {
-            Ok(_) => Ok(()),
-            Err(e) => Err(std::io::Error::new(std::io::ErrorKind::NotConnected, e)),
-        };
-    }
-
-    fn consume(sessions: Arc<RwLock<HashMap<String, Addr<MyWebSocket>>>>, chan: Arc<Channel>, queue: &Queue) -> Result<(), std::io::Error> {
-        let opts = BasicConsumeOptions{ no_local: true, no_ack: false, exclusive: false, nowait: false };
-        return match chan.basic_consume(queue, "", opts, FieldTable::default()).wait() {
-            Ok(con) => Ok(con.set_delegate(Box::new(move | delivery: DeliveryResult |{ 
-                match delivery {
-                    Ok(Some(delivery)) => {
-                        // either extract the session from the header, or default to empty string
-                        // (which will then fail the lookup below)
-                        let session = match delivery.properties.headers().as_ref() {
-                            None => "",
-                            Some(headers) => match &(headers.inner())["session"]  {
-                                lapin::types::AMQPValue::LongString(s) => s.as_str(),
-                                _ => "",
-                            },
-                        };
-                        // reading the flatbuffer will panic if it is invalid; catch_unwind will
-                        // prevent the program from summarily aborting.
-                        match panic::catch_unwind(|| get_root_as_msg(&delivery.data)) {
-                            Ok(msg) => { 
-                                debug!("Got rabbit message, type is {:?}", msg.content_type());
-                                match sessions.read().unwrap().get(session) {
-                                    Some(address) => address.do_send(FlatbuffMessage{ flatbuffer: bytes::Bytes::from(delivery.data), session: String::new() }), 
-                                    None => warn!("Received message for non-existent session {} in {:?}", session, sessions.read().unwrap().keys()),
-                                };
-                            },
-                            Err(_) => error!("Dropping an invalid message buffer"),
-                        };
-
-                        // TODO don't panic
-                        chan.basic_ack(delivery.delivery_tag, BasicAckOptions::default()).wait().expect("ACK failed")
-                    }, // Got message
-                    Ok(None) =>  error!("Consumer cancelled"), // Consumer cancelled
-                    Err(e) => error!("Consumer error {}", e),
-                };
-            }))),
-            Err(e) => Err(std::io::Error::new(std::io::ErrorKind::NotConnected, e)),
-        };
     }
 }
 
@@ -183,7 +185,21 @@ impl Handler<DelSocket> for RabbitReceiver {
     fn handle (&mut self, msg: DelSocket, _ctx: &mut Context<Self>)  {
         let mut locked = self.sessions.write().unwrap();
         match locked.remove(&(msg.session_id.to_string())) {
-            Some(_) => debug!("Removed session {}, remaining sessions {}", msg.session_id, locked.len()),
+            Some(_) => { 
+                debug!("Removed session {}, remaining sessions {}", msg.session_id, locked.len());
+                let mut builder = FlatBufferBuilder::new();
+                let end = ViewEnd::create(&mut builder, &ViewEndArgs{});
+                let ses = builder.create_string(&msg.session_id.to_string());
+                let buffer = Msg::create(&mut builder, &MsgArgs{
+                    content_type: Content::ViewEnd,
+                    session: Some(ses),
+                    content: Some(end.as_union_value()),
+                });
+                builder.finish(buffer, None);
+                if let Some(tx) = &self.tx {
+                    tx.send(FlatbuffMessage{flatbuffer: bytes::Bytes::from(builder.finished_data()), session: msg.session_id.to_string()});
+                }
+            },
             None => warn!("Got disconnect for non-existent session {}", msg.session_id),
         };
     }
@@ -193,34 +209,23 @@ impl Handler<FlatbuffMessage> for RabbitReceiver {
     type Result = ();
 
     fn handle(&mut self, msg: FlatbuffMessage, _ctx: &mut Context<Self>) {
-        let mut headers = FieldTable::default();
-        let root = get_root_as_msg(&msg.flatbuffer); 
-        headers.insert(ShortString::from("sender_id"), string_to_header(&self.id));
-        headers.insert(ShortString::from("session"), string_to_header(&msg.session));
-        headers.insert(ShortString::from("type"), string_to_header(& enum_name_content(root.content_type())));
-        
-        let props = BasicProperties::default().with_headers(headers);
-
-        match self.wchan.basic_publish(&self.ex, "", BasicPublishOptions::default(), msg.flatbuffer.to_vec(), props).wait() {
-            Ok(_) => debug!("sent msg to bus"),
-            Err(e) => error!("failed dispatch to bus: {}", e),
-        };
+        if let Some(tx) = &self.tx {
+            tx.send(msg);
+        }
     }
 }
 
-impl Handler<EchoRequest> for RabbitReceiver {
+impl Handler<WebsocketMessage> for RabbitReceiver {
     type Result = ();
 
-    fn handle(&mut self, msg: EchoRequest, _ctx: &mut Context<Self>) {
-        let mut headers = FieldTable::default();
-        headers.insert(ShortString::from("sender_id"), string_to_header(&self.id));
-        
-        let props = BasicProperties::default().with_headers(headers);
-
-        let payload = msg.content.into_bytes();
-        match self.wchan.basic_publish(&self.ex, "", BasicPublishOptions::default(), payload, props).wait() {
-            Ok(_) => debug!("sent msg to bus"),
-            Err(e) => error!("failed dispatch to bus: {}", e),
+    fn handle(&mut self, msg: WebsocketMessage, _ctx: &mut Context<Self>) {
+        match self.sessions.read().unwrap().get(&msg.session) {
+            Some(address) => {
+                address.do_send(FlatbuffMessage{ flatbuffer: msg.flatbuffer, session: msg.session });
+            },
+            None => {
+                warn!("Received message for non-existent session {}", msg.session);
+            },
         };
     }
 }
@@ -229,22 +234,18 @@ impl Handler<EchoRequest> for RabbitReceiver {
 impl Actor for RabbitReceiver {
     type Context = Context<Self>;
 
-    fn started(&mut self, _ctx: &mut Self::Context) {
-        match RabbitReceiver::consume(self.sessions.clone(), self.rchan.clone(), &self.q) {
-            Ok(_) => info!("Starting Rabbit consumption"),
-            Err(e) => panic!("Unable to consume from rabbit: {}", e),
-        };
+    fn started(&mut self, ctx: &mut Self::Context) {
+        let (tx, rx) = unbounded();
+        self.tx = Some(tx);
+        let addr = Arc::new(ctx.address().clone());
+
+        let t = thread::spawn(move|| {
+            Rabbit::new("amqp://localhost", "switchboard", "switchboard", rx).and_then(|r|r.consume("switchboard", addr.clone()));
+        });
+        self.rabbit = Some(t);
     }
 
     fn stopped(&mut self, _ctx: &mut Self::Context) {
-        match self.wchan.close(503, "Service shut down").wait() {
-            Ok(_) => (),
-            Err(e) => warn!("Attempted to close rabbit channel but got: {}", e),
-        };
-        match self.rchan.close(503, "Service shut down").wait() {
-            Ok(_) => (),
-            Err(e) => warn!("Attempted to close rabbit channel but got: {}", e),
-        };
         debug!("Stopped rabbit receiver");
     }
 }
@@ -263,19 +264,19 @@ pub struct DelSocket{
     session_id: Uuid,
 }
 
-/// Simple message to trigger a dumb rabbit message
-#[derive(Clone, Message)]
-pub struct EchoRequest {
-    content: String,
-}
-
-/// Hand off flatbuffer message between actors
+/// Hand off flatbuffer message between actors -> to rabbit
 #[derive(Clone, Message)]
 pub struct FlatbuffMessage {
     flatbuffer: bytes::Bytes,
     session: String,
 }
 
+/// Hand off flatbuffer message between actors -> to browser
+#[derive(Clone, Message)]
+pub struct WebsocketMessage {
+    flatbuffer: bytes::Bytes,
+    session: String,
+}
 
 /// Actor implementing the websocket connection
 pub struct MyWebSocket {
@@ -286,9 +287,10 @@ pub struct MyWebSocket {
 }
 
 impl MyWebSocket {
+    /// TODO unwind on failure and log
     fn process_buffer(& self, data: bytes::Bytes) {
         let msg = get_root_as_msg(&data); 
-        debug!("Websocket received message, type is {:?}", msg.content_type());
+        debug!("Websocket received message, type is {:?}, at {}", msg.content_type(), (std::time::SystemTime::now().duration_since(std::time::SystemTime::UNIX_EPOCH).unwrap().as_millis()));
         self.rabbit.do_send(FlatbuffMessage{ flatbuffer: data, session: self.id.to_string() } );
     }
 }
@@ -324,7 +326,7 @@ impl StreamHandler<ws::Message, ws::ProtocolError> for MyWebSocket {
             ws::Message::Pong(_) => {
                 self.hb = Instant::now();
             }
-            ws::Message::Text(text) => self.rabbit.do_send(EchoRequest{content: text}),
+            ws::Message::Text(text) => (),
             ws::Message::Binary(bin) => self.process_buffer(bin), 
             ws::Message::Close(_) => {
                 ctx.stop();

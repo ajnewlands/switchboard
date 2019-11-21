@@ -45,14 +45,23 @@
                         var buf = new flatbuffers.ByteBuffer(array);
                         var msg = switchboard.Msg.getRootAsMsg(buf);
 
-                        //log('Received message, type ' + switchboard.ContentName[msg.contentType()]);
                         if (msg.contentType() == switchboard.Content.ViewUpdate) {
+                            var t1 = performance.now();
+                            var update = msg.content(new switchboard.ViewUpdate());
+                            var data = update.dataArray();
 
-                            conn.send(ack);
-                        }
-                        else if (msg.contentType() == switchboard.Content.Broadcast) {
-                            var text = msg.content(new switchboard.Broadcast()).text();
-                            log('Broadcast received: ' + text);
+
+                            var blob = new Blob([data], {type: "image/png"});
+                            var imageURL = URL.createObjectURL(blob);
+                            var img = document.getElementById("myimg");
+                            img.onload = function() {
+                                conn.send(ack);
+                                //console.log("update took " + (performance.now() -t1) + " ms");
+                                URL.revokeObjectURL(imageURL);
+                            }
+                            img.width = 1920;
+                            img.height = 1200;
+                            img.src = imageURL;
                         }
                         else {
                             log('unhandled type');
@@ -139,6 +148,9 @@
     </div>
     <div id="log"
           style="width:40em;height:15em;overflow:auto;border:1px solid black">
+    </div>
+    <div>
+        <img id="myimg"/>
     </div>
     <form id="chatform" onsubmit="return false;">
           <input id="text" type="text" />
