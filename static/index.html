@@ -68,19 +68,25 @@
                                     h_ctx.drawImage(img, 0, 0);
                                     URL.revokeObjectURL(imageURL);
 
-                                    window.requestAnimationFrame( () => {
-                                        var ctx = canvas.getContext("2d");
-                                        ctx.drawImage(h_canvas, 0, 0);
-                                    });
+                                    var ctx = canvas.getContext("2d");
+                                    ctx.drawImage(h_canvas, 0, 0);
                                     //console.log("update took " + (performance.now() -t1) + " ms");
                                 }
                                 img.src = imageURL;
                             } else {
+                                // draw each tile onto our hidden canvas then write the h_canvas pixels to the visible canvas
                                 log('Received ' + update.tilesLength() + ' tiled deltas');
+                                var h_ctx = h_canvas.getContext("2d");
                                 for(i = 0; i < update.tilesLength(); i++) {
                                     var tile = update.tiles(i);
-                                    console.log('Delta at ' + tile.x() + ',' + tile.y());
+                                    console.log('tile length is ' + tile.dataArray().length);
+                                    console.log('Tile numbers ' + tile.x() + ' ' + tile.y() );
+                                    console.log('Co-ords will be ' + tile.x()*16 + ' ' + tile.y() * 16);
+                                    var data = new ImageData(new Uint8ClampedArray(tile.dataArray()), 16, 16);
+                                    h_ctx.putImageData( data, tile.x() * 16, tile.y() * 16);    
                                 }
+                                var ctx = canvas.getContext("2d");
+                                ctx.drawImage(h_canvas, 0, 0);
                                 conn.send(ack);
                             }
                             
