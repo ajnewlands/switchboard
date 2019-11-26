@@ -31,7 +31,14 @@
                       }
                 function connect() {
                     disconnect();
+                    var img = new Image();
                     var wsUri = (window.location.protocol=='https:'&&'wss://'||'ws://')+window.location.host + '/ws/';
+                    var h_canvas = document.createElement('canvas');
+                    var canvas = document.getElementById("mycanvas");
+                    canvas.width = 1920;
+                    canvas.height = 1200;
+                    h_canvas.width = 1920;
+                    h_canvas.height = 1200;
                     conn = new WebSocket(wsUri);
                     conn.binaryType = 'arraybuffer';
                     log('Connecting...');
@@ -49,22 +56,37 @@
                             var t1 = performance.now();
                             var update = msg.content(new switchboard.ViewUpdate());
                             var data = update.dataArray();
+                            log('received update of size ' + array.length + ' incremental bit ' + update.incremental());
 
+                            if ( update.incremental() === false ) {
+                                var blob = new Blob([data], {type: "image/png"});
+                                var imageURL = URL.createObjectURL(blob);
 
-                            var blob = new Blob([data], {type: "image/png"});
-                            var imageURL = URL.createObjectURL(blob);
-                            var img = document.getElementById("myimg");
-                            img.onload = function() {
+                                img.onload = function() {
+                                    conn.send(ack);
+                                    var h_ctx = h_canvas.getContext("2d");
+                                    h_ctx.drawImage(img, 0, 0);
+                                    URL.revokeObjectURL(imageURL);
+
+                                    window.requestAnimationFrame( () => {
+                                        var ctx = canvas.getContext("2d");
+                                        ctx.drawImage(h_canvas, 0, 0);
+                                    });
+                                    //console.log("update took " + (performance.now() -t1) + " ms");
+                                }
+                                img.src = imageURL;
+                            } else {
+                                log('Received ' + update.tilesLength() + ' tiled deltas');
+                                for(i = 0; i < update.tilesLength(); i++) {
+                                    var tile = update.tiles(i);
+                                    console.log('Delta at ' + tile.x() + ',' + tile.y());
+                                }
                                 conn.send(ack);
-                                //console.log("update took " + (performance.now() -t1) + " ms");
-                                URL.revokeObjectURL(imageURL);
                             }
-                            img.width = 1920;
-                            img.height = 1200;
-                            img.src = imageURL;
+                            
                         }
                         else {
-                            log('unhandled type');
+                            log('unhandled type ' + msg.contentType());
                         }
                     };
                     conn.onclose = function() {
@@ -108,11 +130,16 @@
                     return false;
                       });
                 $('#start_view').click(function() {
-                    log('Starting view updates.');
-
+                    capabilities = 0;
+                    if( document.getElementById("full_screen_updates").checked === true ) {
+                        log('Starting view updates (full screen updates without incremental encoding).');
+                    } else if (document.getElementById("bitwise_incremental_updates").checked === true ) {
+                        log('Starting view updates (using bitwise incremental encoding).');
+                        capabilities = capabilities | switchboard.Capability.BitwiseIncremental;
+                    }
+                    
                     // create the viewstart value
-                    switchboard.ViewStart.startViewStart(builder);
-                    var viewstart = switchboard.ViewStart.endViewStart(builder);
+                    var viewstart = switchboard.ViewStart.createViewStart(builder, capabilities);
 
                     // start creating the message itself
                     switchboard.Msg.startMsg(builder);
@@ -124,12 +151,6 @@
                     var buf = builder.asUint8Array();
                     conn.send(buf);
                     return true;
-                });
-                $('#send_invalid').click(function() {
-                    log('sending something invalid');
-                    var array = new Uint8Array();
-                    var buf = new flatbuffers.ByteBuffer(array);
-                    conn.send(buf);
                 });
                 $('#text').keyup(function(e) {
                     if (e.keyCode === 13) {
@@ -149,14 +170,21 @@
     <div id="log"
           style="width:40em;height:15em;overflow:auto;border:1px solid black">
     </div>
-    <div>
-        <img id="myimg"/>
-    </div>
     <form id="chatform" onsubmit="return false;">
-          <input id="text" type="text" />
+        <!--
+        <input id="text" type="text" />
         <input id="send" type="button" value="Send" />
+        -->
         <input id="start_view" type="button" value="Start View" />
-        <input id="send_invalid" type="button" value="send invalid" />
+        <br>
+        <input type="radio" name="schema" id="full_screen_updates" value="full" checked>Full screen updates<br>
+        <input type="radio" name="schema" id="bitwise_incremental_updates" value="xor">bitwise incremental<br>
     </form>
+    <div>
+        <!--
+        <img id="myimg"/>
+        -->
+        <canvas id="mycanvas"/>
+    </div>
     </body>
 </html>

@@ -2,6 +2,8 @@ namespace switchboard;
 
 union Content { ViewStart, ViewUpdate, ViewAck, ViewEnd, Broadcast }
 
+enum Capability: uint { FullScreen = 0, BitwiseIncremental = 1 }
+
 table Broadcast {
     text: string;
 }
@@ -16,10 +18,17 @@ table ViewAck {
   sqn: uint;
 }
 
+table Tile {
+    x: ushort;
+    y: ushort;
+    data: [ubyte];
+}
+
 table ViewUpdate {
     sqn: uint; // assue nobody ever requires more than 2 billion updates.
     incremental: bool = true; // assume that incremental updates are more frequent that initial/full.
     data: [ubyte];
+    tiles: [Tile];
 }
 
 
