@@ -31,7 +31,6 @@
                       }
                 function connect() {
                     disconnect();
-                    var img = new Image();
                     var wsUri = (window.location.protocol=='https:'&&'wss://'||'ws://')+window.location.host + '/ws/';
                     var h_canvas = document.createElement('canvas');
                     var canvas = document.getElementById("mycanvas");
@@ -61,6 +60,7 @@
                             if ( update.incremental() === false ) {
                                 var blob = new Blob([data], {type: "image/png"});
                                 var imageURL = URL.createObjectURL(blob);
+                                var img = new Image();
 
                                 img.onload = function() {
                                     conn.send(ack);
@@ -75,14 +75,26 @@
                                 img.src = imageURL;
                             } else {
                                 // draw each tile onto our hidden canvas then write the h_canvas pixels to the visible canvas
-                                var h_ctx = h_canvas.getContext("2d");
+                                var to_process = update.tilesLength();
+
                                 for(i = 0; i < update.tilesLength(); i++) {
                                     var tile = update.tiles(i);
-                                    var data = new ImageData(new Uint8ClampedArray(tile.dataArray()), tile.w(), tile.h());
-                                    h_ctx.putImageData( data, tile.x(), tile.y());    
+                                    var blob = new Blob([tile.dataArray()], {type: "image/png"});
+                                    var imageURL = URL.createObjectURL(blob);
+                                    var img = new Image();
+
+                                    img.onload = function(img, x, y, url) {
+                                        var h_ctx = h_canvas.getContext("2d");
+                                        h_ctx.drawImage(img, x, y);
+                                        URL.revokeObjectURL(url);
+                                        if( --to_process == 0 ) { // when we run out of deltas to apply, draw them on the visible screen in one go.
+                                            var ctx = canvas.getContext("2d");
+                                            ctx.drawImage(h_canvas, 0, 0);
+                                        }
+                                    }.bind(undefined, img, tile.x(), tile.y(), imageURL);
+
+                                    img.src = imageURL;
                                 }
-                                var ctx = canvas.getContext("2d");
-                                ctx.drawImage(h_canvas, 0, 0);
                                 conn.send(ack);
                             }
                             
