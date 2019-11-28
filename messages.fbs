@@ -21,6 +21,8 @@ table ViewAck {
 table Tile {
     x: ushort;
     y: ushort;
+    w: ushort;
+    h: ushort;
     data: [ubyte];
 }
 
